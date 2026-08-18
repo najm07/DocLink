@@ -1,8 +1,8 @@
 //! Machine identity: an ed25519 keypair persisted per node.
 //!
 //! The fingerprint is the SHA-256 of the public key, hex-encoded —
-//! the same idea as SSH host key fingerprints. The node_id is a
-//! short prefix of it, convenient for logs and URLs.
+//! the same idea as SSH host key fingerprints. The node_id (shown in
+//! the UI as the "DocLink ID") is a short prefix of it.
 
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -47,6 +47,10 @@ impl NodeIdentity {
         self.signing_key.verifying_key()
     }
 
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
+    }
+
     /// Full SHA-256 fingerprint of the public key, hex-encoded.
     pub fn fingerprint(&self) -> String {
         hex::encode(Sha256::digest(self.verifying_key().as_bytes()))
@@ -57,8 +61,27 @@ impl NodeIdentity {
         self.fingerprint()[..16].to_string()
     }
 
-    /// Sign a message — used by the pairing handshake (M4).
+    /// Sign a message (pairing requests, authenticated peer calls).
     pub fn sign(&self, msg: &[u8]) -> Signature {
         self.signing_key.sign(msg)
+    }
+
+    /// Verify an ed25519 signature against a hex-encoded public key.
+    pub fn verify(pubkey_hex: &str, msg: &[u8], signature_hex: &str) -> Result<()> {
+        let pk_bytes: [u8; 32] = hex::decode(pubkey_hex)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("bad pubkey length"))?;
+        let vk = VerifyingKey::from_bytes(&pk_bytes)?;
+        let sig_bytes: [u8; 64] = hex::decode(signature_hex)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("bad signature length"))?;
+        vk.verify_strict(msg, &Signature::from_bytes(&sig_bytes))?;
+        Ok(())
+    }
+
+    /// Fingerprint (hex sha256) of a hex-encoded public key.
+    pub fn fingerprint_from_pubkey_hex(pubkey_hex: &str) -> Result<String> {
+        let bytes = hex::decode(pubkey_hex)?;
+        Ok(hex::encode(Sha256::digest(&bytes)))
     }
 }

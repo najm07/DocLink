@@ -16,3 +16,4 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
+urlencoding = { workspace = true }

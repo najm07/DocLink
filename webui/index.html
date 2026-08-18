@@ -9,14 +9,35 @@
 <body>
   <header>
     <h1>DocLink</h1>
-    <span id="this-node" title="This node's fingerprint"></span>
+    <span id="this-node" title="Click to copy your DocLink ID"></span>
   </header>
   <main>
     <aside id="peers-pane">
-      <h2>Online PCs</h2>
+      <h2>My PCs</h2>
       <ul id="peers"></ul>
+      <section id="requests-section" style="display:none">
+        <h2>Incoming requests</h2>
+        <ul id="requests"></ul>
+      </section>
+      <section id="grants-section" style="display:none">
+        <h2>Granted access</h2>
+        <ul id="grants"></ul>
+      </section>
     </aside>
     <section id="browser-pane">
+      <form id="add-form">
+        <input id="add-id" placeholder="DocLink ID (e.g. 9f2c-1ab0-7e44-d310)" required />
+        <input id="add-alias" placeholder="Name (e.g. PC-Compta)" required />
+        <input id="add-host" placeholder="host:port (optional)" />
+        <select id="add-duration" title="Access duration to request">
+          <option value="86400">1 day</option>
+          <option value="604800" selected>7 days</option>
+          <option value="2592000">30 days</option>
+          <option value="0">until revoked</option>
+        </select>
+        <button type="submit">Add PC</button>
+      </form>
+      <p id="add-status"></p>
       <nav id="breadcrumb"></nav>
       <table id="listing">
         <thead>

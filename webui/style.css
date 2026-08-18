@@ -20,11 +20,17 @@ header {
 }
 
 header h1 { font-size: 18px; margin: 0; }
-#this-node { opacity: 0.7; font-family: ui-monospace, monospace; font-size: 12px; }
+#this-node {
+  opacity: 0.8;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  cursor: pointer;
+}
+#this-node:hover { opacity: 1; }
 
 main {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 260px 1fr;
   min-height: calc(100vh - 50px);
 }
 
@@ -33,13 +39,70 @@ main {
   padding: 12px;
 }
 
-#peers-pane h2 { font-size: 13px; text-transform: uppercase; opacity: 0.6; }
-#peers { list-style: none; margin: 0; padding: 0; }
-#peers li { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+#peers-pane h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin: 14px 0 6px;
+}
+#peers-pane h2:first-child { margin-top: 0; }
+
+#peers, #requests, #grants { list-style: none; margin: 0; padding: 0; }
+#peers li, #requests li, #grants li {
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+#peers li { cursor: pointer; }
+#peers li:hover { background: #8882; }
 #peers li.active { background: #36c2; font-weight: 600; }
-#peers li.peer-disabled { opacity: 0.55; cursor: default; }
+
+.dim { opacity: 0.55; font-size: 12px; }
+
+#requests li, #grants li {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+#grants li { flex-direction: row; justify-content: space-between; align-items: center; }
+
+.req-actions { display: flex; gap: 6px; }
+.req-actions button { flex: 1; }
+
+button {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+button:hover { background: #8882; }
+button.deny { color: #d66; border-color: #d664; }
+button:disabled { opacity: 0.4; cursor: default; }
 
 #browser-pane { padding: 12px 16px; }
+
+#add-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+#add-form input, #add-form select {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+#add-id { width: 220px; font-family: ui-monospace, monospace; }
+#add-alias { width: 160px; }
+#add-host { width: 140px; }
+
+#add-status { min-height: 18px; opacity: 0.8; margin: 4px 0 10px; }
 
 #breadcrumb { margin-bottom: 10px; }
 #breadcrumb a { text-decoration: none; }
@@ -53,4 +116,3 @@ main {
 #listing th { font-size: 12px; opacity: 0.6; }
 
 #status { opacity: 0.7; margin-top: 10px; }
-button { font: inherit; }

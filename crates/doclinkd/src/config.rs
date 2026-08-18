@@ -11,10 +11,14 @@ pub struct Config {
     pub node_name: Option<String>,
     /// Folder this PC publishes to the network (read-only).
     pub share_root: PathBuf,
-    /// HTTP port for the share API + web UI.
+    /// HTTP port for the peer-facing data plane (admin plane = port + 1).
     pub http_port: u16,
     /// Path of the ed25519 identity key file.
     pub identity_key: PathBuf,
+    /// Path of the grants store (who may read my share).
+    pub grants_file: PathBuf,
+    /// Path of the contacts store (PCs I have added).
+    pub contacts_file: PathBuf,
 }
 
 impl Default for Config {
@@ -24,6 +28,8 @@ impl Default for Config {
             share_root: PathBuf::from("./shared"),
             http_port: doclink_core::protocol::DEFAULT_HTTP_PORT,
             identity_key: PathBuf::from("./doclink-identity.key"),
+            grants_file: PathBuf::from("./doclink-grants.json"),
+            contacts_file: PathBuf::from("./doclink-contacts.json"),
         }
     }
 }
@@ -55,5 +61,13 @@ impl Config {
 
     pub fn identity_key_path(&self) -> PathBuf {
         self.identity_key.clone()
+    }
+
+    pub fn grants_path(&self) -> PathBuf {
+        self.grants_file.clone()
+    }
+
+    pub fn contacts_path(&self) -> PathBuf {
+        self.contacts_file.clone()
     }
 }
