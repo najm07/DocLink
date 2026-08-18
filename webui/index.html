@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DocLink</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>DocLink</h1>
+    <span id="this-node" title="This node's fingerprint"></span>
+  </header>
+  <main>
+    <aside id="peers-pane">
+      <h2>Online PCs</h2>
+      <ul id="peers"></ul>
+    </aside>
+    <section id="browser-pane">
+      <nav id="breadcrumb"></nav>
+      <table id="listing">
+        <thead>
+          <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p id="status"></p>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
