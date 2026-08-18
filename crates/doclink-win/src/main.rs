@@ -5,14 +5,14 @@
 //! window. Closing the window does NOT stop the daemon — sharing keeps
 //! working in the background.
 //!
-//! Note: wry re-exports tao as wry::application, so we never depend on
-//! tao directly and the two can never drift out of sync.
+//! Note: tao is a direct dependency (pinned to match wry's internal
+//! version — see Cargo.toml), never import it through wry.
 
 #![windows_subsystem = "windows"]
 
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
-use wry::application::{
+use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -68,6 +68,7 @@ fn main() -> wry::Result<()> {
         .with_url(ADMIN_URL)
         .build(&window)?;
 
+    // tao's run() diverges and returns () — the process exits here.
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         if let Event::WindowEvent {
@@ -78,4 +79,6 @@ fn main() -> wry::Result<()> {
             *control_flow = ControlFlow::Exit;
         }
     });
+    #[allow(unreachable_code)]
+    Ok(())
 }

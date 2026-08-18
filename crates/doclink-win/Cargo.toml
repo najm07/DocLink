@@ -6,4 +6,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# tao is wry's windowing toolkit. Modern wry no longer re-exports it
+# (wry::application is gone), so we depend on it directly.
+# COMPAT: tao must match wry's internal tao version exactly —
+# wry 0.48.x pairs with tao 0.30.x. If wry is bumped, check its
+# Cargo.toml and update this pin to match, or the two tao versions
+# produce incompatible types.
 wry = { workspace = true }
+tao = "0.30"
