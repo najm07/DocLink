@@ -1,12 +1,8 @@
 //! DocLink window: a small WebView2 shell around the local admin UI.
 //!
-//! Double-click UX: if the daemon's admin plane isn't up, spawn
-//! doclinkd.exe from the same folder (no console window), wait for it,
-//! then open the window. Closing the window does NOT stop the daemon —
-//! sharing keeps working in the background.
-//!
-//! Note: tao is a direct dependency (pinned to match wry's internal
-//! version — see Cargo.toml), never import it through wry.
+//! Frameless on purpose — the web UI draws a VS Code-style title bar
+//! and talks to this process over IPC (drag / min / max / close).
+//! Closing the window does NOT stop the daemon.
 
 #![windows_subsystem = "windows"]
 
@@ -25,13 +21,9 @@ use wry::WebViewBuilder;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-// CREATE_NO_WINDOW: spawn a console-subsystem process without allocating
-// a visible terminal. Logs go to doclinkd.log next to the exe instead.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-// Admin plane = data plane + 1 (see doclink_core::protocol::DEFAULT_HTTP_PORT).
-// TODO(M3): read doclink.toml next to the exe in case http_port is overridden.
 const ADMIN_ADDR: (&str, u16) = ("127.0.0.1", 37656);
 const ADMIN_URL: &str = "http://127.0.0.1:37656";
 
@@ -39,8 +31,6 @@ fn admin_up() -> bool {
     TcpStream::connect(ADMIN_ADDR).is_ok()
 }
 
-/// Start doclinkd.exe (same folder as this exe) if the admin plane is down,
-/// then wait until it answers (up to 15 s).
 fn ensure_daemon() {
     if admin_up() {
         return;
@@ -77,27 +67,41 @@ fn ensure_daemon() {
 fn main() -> wry::Result<()> {
     ensure_daemon();
 
-    let event_loop = EventLoop::new();
+    let event_loop = EventLoop::<String>::with_user_event();
+    let proxy = event_loop.create_proxy();
+
     let window = WindowBuilder::new()
         .with_title("DocLink")
+        .with_decorations(false)
         .with_inner_size(LogicalSize::new(1120.0, 740.0))
-        .with_min_inner_size(LogicalSize::new(820.0, 560.0))
+        .with_min_inner_size(LogicalSize::new(800.0, 520.0))
         .build(&event_loop)
         .expect("failed to create window");
 
     let _webview = WebViewBuilder::new()
         .with_url(ADMIN_URL)
+        .with_ipc_handler(move |req| {
+            let _ = proxy.send_event(req.body().clone());
+        })
         .build(&window)?;
 
-    // tao's run() diverges and returns () — the process exits here.
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            *control_flow = ControlFlow::Exit;
+        match event {
+            Event::UserEvent(cmd) => match cmd.as_str() {
+                "drag" => {
+                    let _ = window.drag_window();
+                }
+                "minimize" => window.set_minimized(true),
+                "maximize" => window.set_maximized(!window.is_maximized()),
+                "close" => *control_flow = ControlFlow::Exit,
+                _ => {}
+            },
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit,
+            _ => {}
         }
     });
     #[allow(unreachable_code)]
