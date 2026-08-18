@@ -1,6 +1,6 @@
-// DocLink web UI — talks only to the local daemon's admin plane
-// (127.0.0.1). PCs are added by DocLink ID and approved by the
-// sharing PC; browsing goes through the daemon's signed proxy.
+// DocLink web UI — talks only to the local daemon's admin plane.
+// PCs are added by DocLink ID and approved by the sharing PC;
+// browsing goes through the daemon's signed proxy.
 
 const state = { selected: null, path: "" };
 
@@ -24,7 +24,9 @@ function fmtSize(n) {
 }
 
 function fmtTime(unix) {
-  return unix ? new Date(unix * 1000).toLocaleString() : "";
+  if (!unix) return "—";
+  const d = new Date(unix * 1000);
+  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
 function fmtExpiry(g) {
@@ -37,27 +39,47 @@ function fmtExpiry(g) {
 }
 
 function groupId(id) {
-  return id.replace(/(.{4})(?=.)/g, "$1-");
+  return (id || "").replace(/(.{4})(?=.)/g, "$1-");
+}
+
+function icon(kind) {
+  if (kind === "dir") {
+    return '<svg class="ico" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+  }
+  return '<svg class="ico" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13H7z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M14 3v5h5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
 }
 
 async function loadInfo() {
   const info = await api("/v1/admin/info");
-  const el = document.getElementById("this-node");
-  el.textContent = info.name + " · " + groupId(info.node_id);
-  el.title = "DocLink ID: " + groupId(info.node_id) + " (click to copy)\nfingerprint: " + info.fingerprint;
-  el.onclick = () => navigator.clipboard.writeText(info.node_id);
+  const btn = document.getElementById("this-node");
+  const val = document.getElementById("this-node-id");
+  val.textContent = groupId(info.node_id);
+  btn.title = "Click to copy · fingerprint: " + info.fingerprint;
+  btn.onclick = async () => {
+    await navigator.clipboard.writeText(info.node_id);
+    const prev = val.textContent;
+    val.textContent = "Copied";
+    setTimeout(() => { val.textContent = prev; }, 1200);
+  };
 }
 
 async function loadContacts() {
   const contacts = await api("/v1/admin/contacts");
   const ul = document.getElementById("peers");
   ul.innerHTML = "";
+  if (!contacts.length) {
+    ul.innerHTML = '<li class="empty-row">No PCs yet. Click + to add one by ID.</li>';
+    return;
+  }
   for (const c of contacts) {
     const li = document.createElement("li");
-    const dot = c.online ? "🟢" : "⚪";
-    li.textContent = dot + " " + c.alias;
-    li.title = groupId(c.node_id) + (c.host ? " · " + c.host : "") + "\nstatus: " + c.status;
-    if (state.selected === c.node_id) li.className = "active";
+    li.className = "peer" + (state.selected === c.node_id ? " active" : "");
+    li.innerHTML =
+      '<span class="dot ' + (c.online ? "on" : "off") + '"></span>' +
+      '<span class="peer-meta">' +
+        '<span class="peer-name">' + escapeHtml(c.alias) + '</span>' +
+        '<span class="peer-sub">' + groupId(c.node_id) + ' · ' + escapeHtml(c.status) + '</span>' +
+      '</span>';
     li.onclick = () => {
       state.selected = c.node_id;
       state.path = "";
@@ -66,46 +88,54 @@ async function loadContacts() {
     };
     ul.appendChild(li);
   }
-  if (!contacts.length) {
-    const li = document.createElement("li");
-    li.className = "dim";
-    li.textContent = "No PCs added yet";
-    ul.appendChild(li);
-  }
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 async function loadRequests() {
   const reqs = await api("/v1/admin/requests");
-  document.getElementById("requests-section").style.display = reqs.length ? "" : "none";
+  const section = document.getElementById("requests-section");
+  section.hidden = reqs.length === 0;
+  document.getElementById("req-count").textContent = reqs.length;
   const ul = document.getElementById("requests");
   ul.innerHTML = "";
   for (const r of reqs) {
     const li = document.createElement("li");
-    const label = document.createElement("div");
+    li.className = "card";
     const days = Math.round(r.requested_duration_secs / 86400);
-    label.innerHTML =
-      "<b>" + r.name + "</b> <span class=\"dim\">" + groupId(r.node_id) + "</span><br>" +
-      "<span class=\"dim\">requests " + (r.requested_duration_secs === 0 ? "until revoked" : days + "d") + "</span>";
-    const row = document.createElement("div");
-    row.className = "req-actions";
+    const want = r.requested_duration_secs === 0 ? "until revoked" : days + " days";
+    li.innerHTML =
+      '<div class="card-title">' + escapeHtml(r.name) + '</div>' +
+      '<div class="card-sub">' + groupId(r.node_id) + ' · wants ' + want + '</div>' +
+      '<div class="chip-row"></div>';
+    const row = li.querySelector(".chip-row");
     for (const d of [1, 7, 30]) {
       const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chip";
       b.textContent = d + "d";
       b.onclick = () => decide(r.node_id, "approve", d * 86400);
       row.appendChild(b);
     }
     const inf = document.createElement("button");
-    inf.textContent = "∞";
-    inf.title = "Until revoked";
+    inf.type = "button";
+    inf.className = "chip";
+    inf.textContent = "Always";
+    inf.title = "Until you revoke it";
     inf.onclick = () => decide(r.node_id, "approve", 0);
     row.appendChild(inf);
     const deny = document.createElement("button");
-    deny.textContent = "✕";
-    deny.className = "deny";
-    deny.title = "Deny";
+    deny.type = "button";
+    deny.className = "chip danger";
+    deny.textContent = "Deny";
     deny.onclick = () => decide(r.node_id, "deny", 0);
     row.appendChild(deny);
-    li.append(label, row);
     ul.appendChild(li);
   }
 }
@@ -121,23 +151,35 @@ async function decide(nodeId, decision, secs) {
 
 async function loadGrants() {
   const grants = await api("/v1/admin/grants");
-  document.getElementById("grants-section").style.display = grants.length ? "" : "none";
+  const section = document.getElementById("grants-section");
+  section.hidden = grants.length === 0;
   const ul = document.getElementById("grants");
   ul.innerHTML = "";
   for (const g of grants) {
     const li = document.createElement("li");
-    const label = document.createElement("span");
-    label.innerHTML = "<b>" + g.name + "</b> <span class=\"dim\">" + fmtExpiry(g) + "</span>";
+    li.className = "grant";
+    li.innerHTML =
+      '<span><b>' + escapeHtml(g.name) + '</b><span class="dim"> ' + fmtExpiry(g) + '</span></span>';
     const b = document.createElement("button");
+    b.type = "button";
+    b.className = "link-btn danger";
     b.textContent = "Revoke";
-    b.className = "deny";
     b.onclick = async () => {
       await api("/v1/admin/grants/" + g.fingerprint, { method: "DELETE" });
       loadGrants();
     };
-    li.append(label, b);
+    li.appendChild(b);
     ul.appendChild(li);
   }
+}
+
+function openModal() {
+  document.getElementById("modal").hidden = false;
+  document.getElementById("add-id").focus();
+}
+function closeModal() {
+  document.getElementById("modal").hidden = true;
+  document.getElementById("add-status").textContent = "";
 }
 
 async function addContact(ev) {
@@ -151,6 +193,7 @@ async function addContact(ev) {
     status.textContent = "A DocLink ID is 16 hex characters (dashes are fine).";
     return;
   }
+  status.textContent = "Looking for that PC on the network…";
   try {
     const r = await api("/v1/admin/contacts", {
       method: "POST",
@@ -159,14 +202,17 @@ async function addContact(ev) {
     });
     status.textContent =
       r.status === "approved" ? "Approved — you can browse " + alias + " now."
-      : r.status === "pending" ? "Request sent — waiting for " + alias + " to approve."
+      : r.status === "pending" ? "Request sent. Wait for them to approve it."
       : "Denied by the remote PC.";
-    document.getElementById("add-id").value = "";
-    document.getElementById("add-alias").value = "";
-    document.getElementById("add-host").value = "";
-    loadContacts();
+    if (r.status === "approved" || r.status === "pending") {
+      document.getElementById("add-id").value = "";
+      document.getElementById("add-alias").value = "";
+      document.getElementById("add-host").value = "";
+      loadContacts();
+      if (r.status === "approved") setTimeout(closeModal, 900);
+    }
   } catch (e) {
-    status.textContent = "Error: " + e.message;
+    status.textContent = e.message;
   }
 }
 
@@ -176,16 +222,20 @@ function renderBreadcrumb() {
   if (!state.selected) return;
   const parts = state.path ? state.path.split("/") : [];
   const root = document.createElement("a");
-  root.textContent = "shared";
+  root.textContent = "Shared";
   root.href = "#";
-  root.onclick = () => { state.path = ""; loadListing(); };
+  root.onclick = (e) => { e.preventDefault(); state.path = ""; loadListing(); };
   nav.appendChild(root);
   parts.forEach((part, i) => {
     nav.appendChild(document.createTextNode(" / "));
     const a = document.createElement("a");
     a.textContent = part;
     a.href = "#";
-    a.onclick = () => { state.path = parts.slice(0, i + 1).join("/"); loadListing(); };
+    a.onclick = (e) => {
+      e.preventDefault();
+      state.path = parts.slice(0, i + 1).join("/");
+      loadListing();
+    };
     nav.appendChild(a);
   });
 }
@@ -197,7 +247,7 @@ async function loadListing() {
   tbody.innerHTML = "";
   status.textContent = "";
   if (!state.selected) {
-    status.textContent = "Add a PC by its DocLink ID above, then select it to browse its shared files.";
+    status.innerHTML = "Select a PC on the left, or click <b>+</b> to add one by its DocLink ID.";
     return;
   }
   try {
@@ -207,42 +257,51 @@ async function loadListing() {
     for (const e of data.entries) {
       const tr = document.createElement("tr");
       const tdName = document.createElement("td");
+      tdName.className = "name-cell";
+      tdName.innerHTML = icon(e.kind) + " <span></span>";
+      tdName.querySelector("span").textContent = e.name;
       if (e.kind === "dir") {
-        const a = document.createElement("a");
-        a.textContent = "📁 " + e.name;
-        a.href = "#";
-        a.onclick = () => { state.path = e.path; loadListing(); };
-        tdName.appendChild(a);
-      } else {
-        tdName.textContent = "📄 " + e.name;
+        tdName.classList.add("is-dir");
+        tdName.onclick = () => { state.path = e.path; loadListing(); };
       }
       const tdSize = document.createElement("td");
+      tdSize.className = "num";
       tdSize.textContent = e.kind === "file" ? fmtSize(e.size) : "";
       const tdMod = document.createElement("td");
+      tdMod.className = "muted";
       tdMod.textContent = fmtTime(e.modified_unix);
       const tdActions = document.createElement("td");
+      tdActions.className = "actions";
       if (e.kind === "file") {
         const dl = document.createElement("a");
+        dl.className = "btn-sm";
         dl.textContent = "Download";
         dl.href = "/v1/admin/browse/" + state.selected + "/file?path=" + encodeURIComponent(e.path);
         tdActions.appendChild(dl);
         const pr = document.createElement("button");
+        pr.type = "button";
+        pr.className = "btn-sm ghost";
         pr.textContent = "Print";
         pr.disabled = true;
-        pr.title = "Lands in M3 — downloads to temp, then the Windows print verb";
-        tdActions.appendChild(document.createTextNode(" "));
+        pr.title = "Coming next — downloads to temp, then the Windows print verb";
         tdActions.appendChild(pr);
       }
       tr.append(tdName, tdSize, tdMod, tdActions);
       tbody.appendChild(tr);
     }
-    if (data.entries.length === 0) status.textContent = "Empty folder.";
+    if (data.entries.length === 0) status.textContent = "This folder is empty.";
   } catch (err) {
-    status.textContent = "Error: " + err.message;
+    status.textContent = err.message;
   }
 }
 
+document.getElementById("btn-add").onclick = openModal;
+document.getElementById("btn-cancel").onclick = closeModal;
+document.getElementById("modal").addEventListener("click", (e) => {
+  if (e.target.id === "modal") closeModal();
+});
 document.getElementById("add-form").onsubmit = addContact;
+
 loadInfo();
 loadContacts();
 loadRequests();

@@ -1,16 +1,18 @@
 //! DocLink window: a small WebView2 shell around the local admin UI.
 //!
-//! Double-click UX for testing: if the daemon's admin plane isn't up,
-//! spawn doclinkd.exe from the same folder, wait for it, then open the
-//! window. Closing the window does NOT stop the daemon — sharing keeps
-//! working in the background.
+//! Double-click UX: if the daemon's admin plane isn't up, spawn
+//! doclinkd.exe from the same folder (no console window), wait for it,
+//! then open the window. Closing the window does NOT stop the daemon —
+//! sharing keeps working in the background.
 //!
 //! Note: tao is a direct dependency (pinned to match wry's internal
 //! version — see Cargo.toml), never import it through wry.
 
 #![windows_subsystem = "windows"]
 
+use std::fs::File;
 use std::net::TcpStream;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tao::{
     dpi::LogicalSize,
@@ -19,6 +21,14 @@ use tao::{
     window::WindowBuilder,
 };
 use wry::WebViewBuilder;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+// CREATE_NO_WINDOW: spawn a console-subsystem process without allocating
+// a visible terminal. Logs go to doclinkd.log next to the exe instead.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // Admin plane = data plane + 1 (see doclink_core::protocol::DEFAULT_HTTP_PORT).
 // TODO(M3): read doclink.toml next to the exe in case http_port is overridden.
@@ -39,9 +49,19 @@ fn ensure_daemon() {
         if let Some(dir) = exe.parent() {
             let daemon = dir.join("doclinkd.exe");
             if daemon.exists() {
-                // The daemon is a console app: it gets its own console
-                // window with live logs — useful during testing.
-                let _ = std::process::Command::new(daemon).spawn();
+                let mut cmd = Command::new(&daemon);
+                cmd.current_dir(dir);
+                #[cfg(windows)]
+                {
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+                if let Ok(log) = File::create(dir.join("doclinkd.log")) {
+                    if let Ok(err) = log.try_clone() {
+                        cmd.stdout(Stdio::from(log));
+                        cmd.stderr(Stdio::from(err));
+                    }
+                }
+                let _ = cmd.spawn();
             }
         }
     }
@@ -60,7 +80,8 @@ fn main() -> wry::Result<()> {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("DocLink")
-        .with_inner_size(LogicalSize::new(1080.0, 720.0))
+        .with_inner_size(LogicalSize::new(1120.0, 740.0))
+        .with_min_inner_size(LogicalSize::new(820.0, 560.0))
         .build(&event_loop)
         .expect("failed to create window");
 

@@ -8,46 +8,92 @@
 </head>
 <body>
   <header>
-    <h1>DocLink</h1>
-    <span id="this-node" title="Click to copy your DocLink ID"></span>
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M8 4h7l5 5v11a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/>
+          <path d="M15 4v5h5"/>
+          <path d="M10 13h6M10 17h4"/>
+        </svg>
+      </div>
+      <div>
+        <h1>DocLink</h1>
+        <p class="tagline">Shared files on this network</p>
+      </div>
+    </div>
+    <button id="this-node" class="id-pill" type="button" title="Click to copy your DocLink ID">
+      <span class="id-kicker">Your ID</span>
+      <span id="this-node-id" class="id-value">…</span>
+    </button>
   </header>
+
   <main>
-    <aside id="peers-pane">
-      <h2>My PCs</h2>
+    <aside>
+      <div class="aside-head">
+        <h2>PCs</h2>
+        <button id="btn-add" class="icon-btn" type="button" title="Add a PC">+</button>
+      </div>
       <ul id="peers"></ul>
-      <section id="requests-section" style="display:none">
-        <h2>Incoming requests</h2>
+
+      <section id="requests-section" hidden>
+        <h2>Incoming <span id="req-count" class="badge">0</span></h2>
         <ul id="requests"></ul>
       </section>
-      <section id="grants-section" style="display:none">
+
+      <section id="grants-section" hidden>
         <h2>Granted access</h2>
         <ul id="grants"></ul>
       </section>
     </aside>
+
     <section id="browser-pane">
-      <form id="add-form">
-        <input id="add-id" placeholder="DocLink ID (e.g. 9f2c-1ab0-7e44-d310)" required />
-        <input id="add-alias" placeholder="Name (e.g. PC-Compta)" required />
-        <input id="add-host" placeholder="host:port (optional)" />
-        <select id="add-duration" title="Access duration to request">
-          <option value="86400">1 day</option>
-          <option value="604800" selected>7 days</option>
-          <option value="2592000">30 days</option>
-          <option value="0">until revoked</option>
-        </select>
-        <button type="submit">Add PC</button>
-      </form>
-      <p id="add-status"></p>
       <nav id="breadcrumb"></nav>
-      <table id="listing">
-        <thead>
-          <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-      <p id="status"></p>
+      <div class="table-wrap">
+        <table id="listing">
+          <thead>
+            <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="status" class="empty"></p>
     </section>
   </main>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-card">
+      <h3>Add a PC</h3>
+      <p class="hint">Ask the other person for their DocLink ID (in the top-right of their window), then give this PC a name you will recognize.</p>
+      <form id="add-form">
+        <label>DocLink ID
+          <input id="add-id" placeholder="9f2c-1ab0-7e44-d310" autocomplete="off" spellcheck="false" required />
+        </label>
+        <label>Name
+          <input id="add-alias" placeholder="PC-Compta" required />
+        </label>
+        <label>Access to request
+          <select id="add-duration">
+            <option value="86400">1 day</option>
+            <option value="604800" selected>7 days</option>
+            <option value="2592000">30 days</option>
+            <option value="0">Until they revoke it</option>
+          </select>
+        </label>
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <label>Host override (only if they never appear automatically)
+            <input id="add-host" placeholder="192.168.1.40:37655" />
+          </label>
+        </details>
+        <p id="add-status" class="form-status"></p>
+        <div class="modal-actions">
+          <button type="button" id="btn-cancel" class="ghost">Cancel</button>
+          <button type="submit">Send request</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>
