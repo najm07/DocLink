@@ -22,6 +22,11 @@ pub struct PeerRegistry {
 }
 
 impl PeerRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn upsert(&self, beacon: Beacon, addr: std::net::SocketAddr) {
         let peer = Peer {
             node_id: beacon.node_id.clone(),
