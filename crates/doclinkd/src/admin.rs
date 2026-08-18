@@ -10,7 +10,7 @@ use crate::store::{Contact, ContactsFile, Grant, GrantsFile, SharedStore};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use doclink_core::discovery::PeerRegistry;
 use doclink_core::identity::NodeIdentity;

@@ -73,5 +73,5 @@ pub fn require_auth(
 
     let canonical = format!("{method}\n{path_q}\n{ts}\n{}", String::from_utf8_lossy(body));
     NodeIdentity::verify(&pk, canonical.as_bytes(), &sig).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    Ok(grant)
+    Ok(grant.clone())
 }
