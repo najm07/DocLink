@@ -10,3 +10,6 @@
 /doclink-grants.json
 /doclink-contacts.json
 /shared
+
+# graphify knowledge graph output
+/graphify-out

@@ -5,6 +5,7 @@ cargo build --release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $dist = "dist/doclink"
+Remove-Item -Recurse -Force $dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $dist | Out-Null
 Copy-Item target/release/doclinkd.exe $dist
 Copy-Item target/release/doclink-win.exe $dist
