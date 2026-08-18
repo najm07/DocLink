@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use doclink_core::identity::NodeIdentity;
 use doclink_core::protocol::{
     canonical_decision_string, canonical_request_string, ErrorResponse, ListResponse, NodeInfo,
-    PairDecision, PairDecisionResponse, PairRequest, PairStatus, PairStatusResponse,
+    PairDecision, PairRequest, PairStatus, PairStatusResponse,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Default)]
 pub struct PairingState {
     pub pending: Arc<Mutex<HashMap<String, PairRequest>>>, // keyed by requester node_id
-    pub decisions: Arc<Mutex<HashMap<String, PairDecisionResponse>>>,
+    pub decisions: Arc<Mutex<HashMap<String, PairStatusResponse>>>,
 }
 
 #[derive(Clone)]
@@ -210,8 +210,7 @@ async fn pair_request(
 }
 
 /// Grantor -> requester notification. Lets the requester learn the outcome
-/// even when it isn't polling the grantor's admin plane (which it can't —
-/// the admin plane is localhost-only).
+/// even though it cannot reach the grantor's admin plane (localhost-only).
 async fn pair_decision(
     State(s): State<AppState>,
     body: String,
@@ -248,7 +247,7 @@ pub fn apply_decision(
     requester_node_id: &str,
     decision: &str,
     duration_secs: u64,
-) -> Result<PairDecisionResponse, &'static str> {
+) -> Result<PairStatusResponse, &'static str> {
     let pending = pairing
         .pending
         .lock()
@@ -256,7 +255,7 @@ pub fn apply_decision(
         .remove(requester_node_id)
         .ok_or("no pending request from this node")?;
     if decision != "approve" {
-        return Ok(PairDecisionResponse {
+        return Ok(PairStatusResponse {
             status: PairStatus::Denied,
             expires_unix: None,
         });
@@ -278,7 +277,7 @@ pub fn apply_decision(
     let mut g = grants.lock().unwrap();
     g.data_mut().upsert(grant);
     g.save().map_err(|_| "failed to persist grant")?;
-    Ok(PairDecisionResponse {
+    Ok(PairStatusResponse {
         status: PairStatus::Approved,
         expires_unix: expires,
     })

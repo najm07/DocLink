@@ -128,14 +128,10 @@ pub enum PairStatus {
     Unknown,
 }
 
+/// Outcome of a pair request — returned by /v1/pair/request,
+/// /v1/pair/status, and the admin decision endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairStatusResponse {
-    pub status: PairStatus,
-    pub expires_unix: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PairDecisionResponse {
     pub status: PairStatus,
     pub expires_unix: Option<u64>,
 }

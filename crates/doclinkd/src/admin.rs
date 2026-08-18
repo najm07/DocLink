@@ -251,10 +251,7 @@ async fn decide_request(
         body.duration_secs,
     )
     .map_err(|e| err(StatusCode::NOT_FOUND, e))?;
-    Ok(Json(PairStatusResponse {
-        status: resp.status,
-        expires_unix: resp.expires_unix,
-    }))
+    Ok(Json(resp))
 }
 
 async fn list_grants(State(s): State<AppState>) -> Json<Vec<GrantInfo>> {
