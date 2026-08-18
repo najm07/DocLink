@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::{ControlFlow, EventLoopBuilder},
     window::WindowBuilder,
 };
 use wry::WebViewBuilder;
@@ -67,7 +67,8 @@ fn ensure_daemon() {
 fn main() -> wry::Result<()> {
     ensure_daemon();
 
-    let event_loop = EventLoop::<String>::with_user_event();
+    // tao 0.30: user events live on EventLoopBuilder, not EventLoop::with_user_event.
+    let event_loop = EventLoopBuilder::<String>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
     let window = WindowBuilder::new()
