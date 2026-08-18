@@ -24,13 +24,16 @@ any time.
 ## M2 — Pairing and trust (v0.2)
 
 - [x] DocLink ID displayed in the window (grouped hex, click to copy)
-- [x] Add PC by ID + alias (+ manual host:port fallback)
+- [x] Add PC by ID + alias (+ manual host:port fallback for filtered subnets)
 - [x] Signed pair requests; approval queue on the sharing PC
 - [x] Granting periods (1d / 7d / 30d / until revoked) + auto-expiry sweep
 - [x] Revocation, enforced on every request
 - [x] Signature-authenticated data plane; admin plane on localhost only
 - [x] Daemon-side browse proxy (browser talks only to localhost)
-- [ ] socket2 + SO_REUSEADDR so two dev instances can share one machine
+- [x] Discovery waits for late beacons on Add PC (no manual host needed)
+- [x] socket2 SO_REUSEADDR/REUSEPORT: several nodes can share one machine
+- [x] Loopback beacons: same-machine instances discover each other
+- [x] `--port` flag for a second same-PC instance
 - [ ] Two-node verification on the office LAN (firewall rules for 37654/37655)
 
 ## M3 — Actions and polish

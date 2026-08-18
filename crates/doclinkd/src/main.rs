@@ -20,6 +20,10 @@ struct Cli {
     /// Path to the config file (default: ./doclink.toml)
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Override the data-plane port (admin plane = port + 1).
+    /// Useful for a second instance on the same machine.
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 #[tokio::main]
@@ -29,7 +33,10 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let cfg = config::Config::load(cli.config.as_deref()).context("loading config")?;
+    let mut cfg = config::Config::load(cli.config.as_deref()).context("loading config")?;
+    if let Some(p) = cli.port {
+        cfg.http_port = p;
+    }
     let identity = NodeIdentity::load_or_generate(&cfg.identity_key_path())?;
 
     let node = NodeInfo {

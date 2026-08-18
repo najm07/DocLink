@@ -4,12 +4,23 @@
 //! listens for beacons from others. A peer is online until it has
 //! been silent for PEER_TTL_SECS.
 //!
+//! Discovery is only an address book (node_id -> current IP + port).
+//! Trust comes from pairing, never from presence on the network.
+//!
+//! Notes:
+//! - The listener binds with SO_REUSEADDR (+ SO_REUSEPORT on unix) so
+//!   multiple nodes can run on one machine for testing.
+//! - Beacons go to the limited broadcast address AND to loopback, so
+//!   same-machine instances discover each other even when the network
+//!   stack doesn't loop broadcasts back.
+//!
 //! TODO(interop): align beacon fields with PrintLink's discovery
 //! format (Printlink repo, agent/discovery.py) so both ecosystems
 //! can share a network segment and compose (e.g. print-on-host).
 
 use crate::protocol::{Beacon, Peer, BEACON_INTERVAL_SECS, DISCOVERY_PORT, PEER_TTL_SECS};
 use anyhow::Result;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -57,7 +68,9 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Broadcast our presence until shutdown is signalled.
+/// Broadcast our presence until shutdown is signalled. Each beacon goes
+/// to the limited broadcast address (other machines) and to loopback
+/// (other instances on this machine).
 pub async fn run_broadcast(
     beacon: Beacon,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -65,13 +78,18 @@ pub async fn run_broadcast(
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
     let payload = serde_json::to_vec(&beacon)?;
-    let target = format!("255.255.255.255:{DISCOVERY_PORT}");
+    let targets = [
+        format!("255.255.255.255:{DISCOVERY_PORT}"),
+        format!("127.0.0.1:{DISCOVERY_PORT}"),
+    ];
     let mut interval = tokio::time::interval(Duration::from_secs(BEACON_INTERVAL_SECS));
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if let Err(e) = socket.send_to(&payload, &target).await {
-                    warn!(%e, "discovery broadcast failed");
+                for target in &targets {
+                    if let Err(e) = socket.send_to(&payload, target).await {
+                        warn!(%e, %target, "discovery broadcast failed");
+                    }
                 }
             }
             _ = shutdown.changed() => break,
@@ -81,14 +99,23 @@ pub async fn run_broadcast(
 }
 
 /// Listen for other nodes' beacons and keep the registry fresh.
+/// SO_REUSEADDR lets several nodes share the port on one machine;
+/// broadcast beacons are then delivered to every bound listener.
 pub async fn run_listener(
     registry: PeerRegistry,
     own_node_id: String,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    // TODO(M2): use socket2 with SO_REUSEADDR so two agents can run on
-    // one machine (dev scenario) without the bind failing.
-    let socket = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await?;
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+    let bind_addr: std::net::SocketAddr = ([0, 0, 0, 0], DISCOVERY_PORT).into();
+    socket.bind(&bind_addr.into())?;
+    socket.set_nonblocking(true)?;
+    let std_socket: std::net::UdpSocket = socket.into();
+    let socket = UdpSocket::from_std(std_socket)?;
+
     let mut buf = vec![0u8; 2048];
     loop {
         tokio::select! {

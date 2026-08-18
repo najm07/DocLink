@@ -18,6 +18,7 @@ use doclink_core::protocol::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -141,28 +142,55 @@ struct AddContactBody {
     duration_secs: u64,
 }
 
-/// Add a PC by DocLink ID: locate it (discovery, or manual host:port),
-/// verify its identity, send a signed pair request, persist the contact.
+/// How long to wait for a beacon from the target before giving up.
+/// Beacons repeat every 5 s, and the peer may have just started.
+const DISCOVERY_WAIT: Duration = Duration::from_secs(6);
+
+/// Add a PC by DocLink ID: locate it via discovery (waiting a few
+/// seconds if needed), verify its identity, send a signed pair request,
+/// persist the contact. A manual host:port remains as a fallback for
+/// subnets where broadcast beacons are filtered.
 async fn add_contact(
     State(s): State<AppState>,
     Json(body): Json<AddContactBody>,
 ) -> Result<Json<PairStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let target = {
-        let peers = s.inner.peers.snapshot();
-        peers
-            .into_iter()
-            .find(|p| p.node_id == body.node_id)
-            .map(|p| (format!("http://{}:{}", p.addr, p.http_port), p.fingerprint))
-            .or_else(|| {
-                body.host
-                    .clone()
-                    .map(|h| (format!("http://{h}"), String::new()))
-            })
+    if body.node_id == s.inner.node.node_id {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "that's this PC's own DocLink ID",
+        ));
+    }
+
+    let target = if let Some(h) = body.host.clone() {
+        Some((format!("http://{h}"), String::new()))
+    } else {
+        // Poll the registry: the first beacon from a peer that just
+        // started (or whose firewall prompt was just approved) may
+        // take a few seconds to arrive.
+        let deadline = Instant::now() + DISCOVERY_WAIT;
+        let mut found = None;
+        loop {
+            if let Some(p) = s
+                .inner
+                .peers
+                .snapshot()
+                .into_iter()
+                .find(|p| p.node_id == body.node_id)
+            {
+                found = Some((format!("http://{}:{}", p.addr, p.http_port), p.fingerprint));
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        found
     };
     let Some((base, discovered_fp)) = target else {
         return Err(err(
             StatusCode::NOT_FOUND,
-            "peer not seen on the LAN — provide host:port",
+            "peer not seen on the LAN yet — check it is running DocLink and that the firewall allows port 37654/udp, then try again",
         ));
     };
 

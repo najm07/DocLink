@@ -29,6 +29,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 urlencoding = "2"
+socket2 = "0.5"
 # debug-embed: debug builds read webui/ from disk (live edits),
 # release builds compile it into the binary (single-file deployment).
 rust-embed = { version = "8", features = ["debug-embed"] }
