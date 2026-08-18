@@ -1,6 +1,6 @@
 [package]
 name = "doclinkd"
-description = "DocLink node daemon: publishes the local share and hosts the browser UI"
+description = "DocLink node daemon: publishes the local share and hosts the embedded UI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,8 +16,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 axum = { workspace = true }
-tower-http = { workspace = true }
 toml = { workspace = true }
 hex = { workspace = true }
 urlencoding = { workspace = true }
 reqwest = { workspace = true }
+rust-embed = { workspace = true }

@@ -35,19 +35,22 @@ any time.
 
 ## M3 — Actions and polish
 
+- [x] `doclink-win` WebView2 window shell (auto-starts the daemon)
+- [x] Web UI embedded into doclinkd.exe (single-file daemon)
+- [x] `dist.ps1` portable test package (two exes in a zip)
 - [ ] Streaming downloads + `Range` support (no whole-file buffering)
 - [ ] Print button: download to temp, then Windows shell `print` verb
       via windows-rs (`ShellExecuteEx`)
 - [ ] Toast notifications (pair request received, grant expiring soon)
 - [ ] Graceful shutdown (Ctrl-C / service stop)
 - [ ] Contact status refresh (re-poll pair/status, surface expiry)
+- [ ] Tray icon so the daemon is visible/manageable without the window
 
 ## M4 — Encryption and packaging
 
 - [ ] TLS with pinned peer certificates (protocol v0.3)
 - [ ] Identity key file permissions hardening
-- [ ] Single-file release build; MSI via cargo-wix (mirror Printlink's
-      installer approach)
+- [ ] Proper installer (MSI via cargo-wix, mirror Printlink's approach)
 - [ ] Autostart on login (registry Run key or Scheduled Task)
 
 ## Post-v1 ideas

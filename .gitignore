@@ -2,8 +2,11 @@
 **/*.rs.bk
 *.pdb
 .env
+/dist
 
 # Local runtime state
 /doclink.toml
 /doclink-identity.key
+/doclink-grants.json
+/doclink-contacts.json
 /shared

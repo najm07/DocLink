@@ -11,14 +11,15 @@ print jobs, DocLink publishes files.
 
 ## How it works
 
-Each PC runs one small daemon (`doclinkd`):
+Each PC runs one small daemon (`doclinkd`) plus an optional window shell
+(`doclink-win`):
 
 - **Publisher** — serves a designated local folder (read-only) to paired
   PCs only. Every request is signature-authenticated against a grant list.
 - **Directory** — UDP beacons resolve DocLink IDs to current IPs and show
   who is online (an address book, not a trust decision).
-- **Browser** — a localhost-only window: add PCs by ID, approve incoming
-  requests, manage grants, browse shares, download, print.
+- **Browser** — a localhost-only admin plane serving the UI (embedded in
+  the exe), plus a small WebView2 window that opens it.
 
 ### Trust model (AnyDesk-style)
 
@@ -47,18 +48,22 @@ Each PC runs one small daemon (`doclinkd`):
 | 37656 | admin (window UI) | localhost only |
 | 37654/udp | discovery beacons | LAN |
 
-## Quickstart
+## Quickstart (development)
 
 ```sh
 cargo update          # refresh dependency baselines
 cargo run -p doclinkd # first run generates identity, ./shared, stores
-# open http://localhost:37656
+# open http://localhost:37656  (or: cargo run -p doclink-win)
 ```
 
-1. Note your DocLink ID in the window header; share it with a colleague.
-2. They add you: ID + a name + requested duration → you approve in the
-   Incoming requests panel.
-3. Drop files into `./shared` — granted PCs can now browse and download.
+## Install on test PCs
+
+```powershell
+.\dist.ps1   # builds dist/doclink-portable.zip (two exes, nothing else)
+```
+
+Copy the zip to each PC, unzip, run `doclink-win.exe`, approve the
+firewall prompt. See **docs/testing.md** for the full walkthrough.
 
 Optional `doclink.toml` next to the binary:
 
@@ -76,16 +81,20 @@ contacts_file = "./doclink-contacts.json"
 | Path | Purpose |
 |---|---|
 | `crates/doclink-core` | Protocol types, ed25519 identity, UDP discovery |
-| `crates/doclinkd` | Daemon: data plane (auth + pairing), admin plane, browse proxy, stores |
+| `crates/doclinkd` | Daemon: data plane (auth + pairing), admin plane, browse proxy, stores, embedded UI |
+| `crates/doclink-win` | WebView2 window shell (auto-starts the daemon) |
 | `docs/protocol.md` | Wire protocol specification (v0.2) |
 | `docs/mvp.md` | Milestone breakdown M0–M4 |
-| `webui` | Window UI: contacts, requests, grants, folder browser |
+| `docs/testing.md` | Multi-PC test deployment guide |
+| `dist.ps1` | Portable package builder |
+| `webui` | Window UI source (embedded into doclinkd at build time) |
 
 ## Status
 
-M2 — pairing and trust implemented; see `docs/mvp.md`. Shares are
-read-only in v1 by design. Traffic is authenticated but not yet encrypted
-(TLS lands in M4) — use on a trusted office LAN.
+M2 — pairing and trust implemented; portable test package available. See
+`docs/mvp.md`. Shares are read-only in v1 by design. Traffic is
+authenticated but not yet encrypted (TLS lands in M4) — use on a trusted
+office LAN.
 
 ## License
 

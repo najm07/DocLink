@@ -1,0 +1,9 @@
+[package]
+name = "doclink-win"
+description = "DocLink window: a small WebView2 shell around the local admin UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wry = { workspace = true }

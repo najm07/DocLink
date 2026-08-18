@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/doclink-core", "crates/doclinkd"]
+members = ["crates/doclink-core", "crates/doclinkd", "crates/doclink-win"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,7 +20,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"
-tower-http = { version = "0.6", features = ["fs"] }
 toml = "0.8"
 sha2 = "0.10"
 hex = "0.4"
@@ -30,3 +29,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 urlencoding = "2"
+# debug-embed: debug builds read webui/ from disk (live edits),
+# release builds compile it into the binary (single-file deployment).
+rust-embed = { version = "8", features = ["debug-embed"] }
+wry = "0.48"

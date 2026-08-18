@@ -6,8 +6,8 @@ use crate::proxy::{self, ProxyError};
 use crate::server::{self, PairingState};
 use crate::store::{Contact, ContactsFile, GrantsFile, SharedStore};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::Response;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use doclink_core::discovery::PeerRegistry;
@@ -18,7 +18,6 @@ use doclink_core::protocol::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tower_http::services::ServeDir;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -67,8 +66,40 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/grants/{fingerprint}", delete(revoke_grant))
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
-        .fallback_service(ServeDir::new("webui"))
+        .fallback(static_file)
         .with_state(state)
+}
+
+// ---- Embedded web UI ----
+
+/// webui/ is compiled into the binary in release builds and read from
+/// disk in debug builds (rust-embed's debug-embed feature), so UI edits
+/// during development don't need a rebuild.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../webui"]
+struct WebUi;
+
+async fn static_file(uri: axum::http::Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    match WebUi::get(path) {
+        Some(content) => {
+            let mime = match path.rsplit('.').next() {
+                Some("html") => "text/html; charset=utf-8",
+                Some("css") => "text/css; charset=utf-8",
+                Some("js") => "text/javascript; charset=utf-8",
+                Some("svg") => "image/svg+xml",
+                Some("png") => "image/png",
+                _ => "application/octet-stream",
+            };
+            (
+                [(header::CONTENT_TYPE, mime)],
+                content.data.into_owned(),
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
