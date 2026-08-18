@@ -8,8 +8,11 @@
 //!
 //! The caller must hold a live grant: sha256(pubkey) must equal the
 //! fingerprint stored when the share owner approved the pairing.
+//! On success the matching grant is returned so handlers can enforce
+//! its path scope.
 
 use crate::server::AppState;
+use crate::store::Grant;
 use axum::http::{HeaderMap, StatusCode};
 use doclink_core::identity::NodeIdentity;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,7 +32,7 @@ pub fn require_auth(
     path_q: &str,
     body: &[u8],
     state: &AppState,
-) -> Result<(), StatusCode> {
+) -> Result<Grant, StatusCode> {
     let get = |k: &str| {
         headers
             .get(k)
@@ -69,5 +72,6 @@ pub fn require_auth(
     }
 
     let canonical = format!("{method}\n{path_q}\n{ts}\n{}", String::from_utf8_lossy(body));
-    NodeIdentity::verify(&pk, canonical.as_bytes(), &sig).map_err(|_| StatusCode::UNAUTHORIZED)
+    NodeIdentity::verify(&pk, canonical.as_bytes(), &sig).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    Ok(grant)
 }

@@ -137,6 +137,8 @@ pub struct PairStatusResponse {
 }
 
 /// A grant as stored by the sharing node (admin view).
+/// `paths` empty = full access to the share; otherwise only the listed
+/// files/folders (and the parent folders needed to reach them).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrantInfo {
     pub fingerprint: String,
@@ -144,6 +146,7 @@ pub struct GrantInfo {
     pub name: String,
     pub granted_unix: u64,
     pub expires_unix: Option<u64>,
+    pub paths: Vec<String>,
 }
 
 /// A contact as stored by the browsing node (admin view).

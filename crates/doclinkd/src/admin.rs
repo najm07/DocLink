@@ -1,20 +1,22 @@
 //! Admin plane (127.0.0.1 only): window UI, contacts, approvals,
-//! revocation, and the signed browse proxy. Never bound to a LAN
-//! interface — management operations are unreachable from the network.
+//! revocation, per-item share scoping, own-share management, and the
+//! signed browse proxy. Never bound to a LAN interface — management
+//! operations are unreachable from the network.
 
 use crate::proxy::{self, ProxyError};
 use crate::server::{self, PairingState};
-use crate::store::{Contact, ContactsFile, GrantsFile, SharedStore};
+use crate::share::{ShareError, ShareRoot};
+use crate::store::{Contact, ContactsFile, Grant, GrantsFile, SharedStore};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use doclink_core::discovery::PeerRegistry;
 use doclink_core::identity::NodeIdentity;
 use doclink_core::protocol::{
-    canonical_request_string, ContactInfo, ErrorResponse, GrantInfo, NodeInfo, PairRequest,
-    PairStatus, PairStatusResponse,
+    canonical_request_string, ContactInfo, ErrorResponse, GrantInfo, ListResponse, NodeInfo,
+    PairRequest, PairStatus, PairStatusResponse,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -32,6 +34,7 @@ pub(crate) struct AdminInner {
     pub grants: SharedStore<GrantsFile>,
     pub contacts: SharedStore<ContactsFile>,
     pub pairing: PairingState,
+    pub share: ShareRoot,
 }
 
 impl AppState {
@@ -42,6 +45,7 @@ impl AppState {
         grants: SharedStore<GrantsFile>,
         contacts: SharedStore<ContactsFile>,
         pairing: PairingState,
+        share: ShareRoot,
     ) -> Self {
         Self {
             inner: Arc::new(AdminInner {
@@ -51,6 +55,7 @@ impl AppState {
                 grants,
                 contacts,
                 pairing,
+                share,
             }),
         }
     }
@@ -64,7 +69,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/requests", get(list_requests))
         .route("/v1/admin/requests/{node_id}/decision", post(decide_request))
         .route("/v1/admin/grants", get(list_grants))
-        .route("/v1/admin/grants/{fingerprint}", delete(revoke_grant))
+        .route(
+            "/v1/admin/grants/{fingerprint}",
+            delete(revoke_grant).put(update_grant),
+        )
+        .route("/v1/admin/share-item", post(share_item))
+        .route("/v1/admin/myshare/list", get(myshare_list))
+        .route("/v1/admin/myshare", delete(myshare_delete))
+        .route("/v1/admin/myshare/reveal", post(myshare_reveal))
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
         .fallback(static_file)
@@ -112,6 +124,34 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorRes
     )
 }
 
+fn share_err(e: ShareError) -> (StatusCode, Json<ErrorResponse>) {
+    let status = match e {
+        ShareError::NotFound(_) => StatusCode::NOT_FOUND,
+        ShareError::OutsideRoot | ShareError::IsRoot => StatusCode::FORBIDDEN,
+        ShareError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    err(status, e.to_string())
+}
+
+/// true if `path` lies strictly inside `ancestor` (forward-slash paths).
+fn within(path: &str, ancestor: &str) -> bool {
+    !ancestor.is_empty()
+        && path.len() > ancestor.len()
+        && path.starts_with(ancestor)
+        && path.as_bytes()[ancestor.len()] == b'/'
+}
+
+fn to_grant_info(g: &Grant) -> GrantInfo {
+    GrantInfo {
+        fingerprint: g.fingerprint.clone(),
+        node_id: g.node_id.clone(),
+        name: g.name.clone(),
+        granted_unix: g.granted_unix,
+        expires_unix: g.expires_unix,
+        paths: g.paths.clone(),
+    }
+}
+
 async fn info(State(s): State<AppState>) -> Json<NodeInfo> {
     Json(s.inner.node.clone())
 }
@@ -143,7 +183,6 @@ struct AddContactBody {
 }
 
 /// How long to wait for a beacon from the target before giving up.
-/// Beacons repeat every 5 s, and the peer may have just started.
 const DISCOVERY_WAIT: Duration = Duration::from_secs(6);
 
 /// Add a PC by DocLink ID: locate it via discovery (waiting a few
@@ -164,9 +203,6 @@ async fn add_contact(
     let target = if let Some(h) = body.host.clone() {
         Some((format!("http://{h}"), String::new()))
     } else {
-        // Poll the registry: the first beacon from a peer that just
-        // started (or whose firewall prompt was just approved) may
-        // take a few seconds to arrive.
         let deadline = Instant::now() + DISCOVERY_WAIT;
         let mut found = None;
         loop {
@@ -315,19 +351,7 @@ async fn decide_request(
 
 async fn list_grants(State(s): State<AppState>) -> Json<Vec<GrantInfo>> {
     let grants = s.inner.grants.lock().unwrap().read().clone();
-    Json(
-        grants
-            .grants
-            .iter()
-            .map(|g| GrantInfo {
-                fingerprint: g.fingerprint.clone(),
-                node_id: g.node_id.clone(),
-                name: g.name.clone(),
-                granted_unix: g.granted_unix,
-                expires_unix: g.expires_unix,
-            })
-            .collect(),
-    )
+    Json(grants.grants.iter().map(to_grant_info).collect())
 }
 
 async fn revoke_grant(
@@ -345,13 +369,121 @@ async fn revoke_grant(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ---- Browse proxy ----
+#[derive(Deserialize)]
+struct GrantUpdate {
+    /// Empty = full access; otherwise only these paths are visible.
+    paths: Vec<String>,
+}
+
+/// Change a grant's access scope (which files/folders the grantee sees).
+async fn update_grant(
+    State(s): State<AppState>,
+    Path(fingerprint): Path<String>,
+    Json(body): Json<GrantUpdate>,
+) -> Result<Json<GrantInfo>, (StatusCode, Json<ErrorResponse>)> {
+    let mut g = s.inner.grants.lock().unwrap();
+    let info = {
+        let Some(grant) = g
+            .data_mut()
+            .grants
+            .iter_mut()
+            .find(|x| x.fingerprint == fingerprint)
+        else {
+            return Err(err(StatusCode::NOT_FOUND, "unknown grant"));
+        };
+        grant.paths = body.paths;
+        to_grant_info(grant)
+    };
+    g.save()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(info))
+}
+
+#[derive(Deserialize)]
+struct ShareItemBody {
+    path: String,
+    fingerprints: Vec<String>,
+}
+
+/// Item-centric sharing: check/uncheck which granted PCs may see one
+/// file or folder. Full-access grants (empty paths) already cover the
+/// item and are left untouched; scoped grants gain or lose the path.
+async fn share_item(
+    State(s): State<AppState>,
+    Json(body): Json<ShareItemBody>,
+) -> Result<Json<Vec<GrantInfo>>, (StatusCode, Json<ErrorResponse>)> {
+    if body.path.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "path must not be the share root"));
+    }
+    // The item must actually exist in my share.
+    s.inner
+        .share
+        .resolve(&body.path)
+        .map_err(share_err)?;
+
+    let mut g = s.inner.grants.lock().unwrap();
+    for grant in &mut g.data_mut().grants {
+        let wanted = body.fingerprints.contains(&grant.fingerprint);
+        if wanted {
+            let covered = grant
+                .paths
+                .iter()
+                .any(|p| body.path == *p || within(&body.path, p));
+            if !grant.paths.is_empty() && !covered {
+                grant.paths.push(body.path.clone());
+            }
+        } else {
+            grant
+                .paths
+                .retain(|p| *p != body.path && !within(p, &body.path));
+        }
+    }
+    g.save()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let infos = g.read().grants.iter().map(to_grant_info).collect();
+    Ok(Json(infos))
+}
+
+// ---- My share (owner-side management) ----
 
 #[derive(Deserialize)]
 struct BrowseQuery {
     #[serde(default)]
     path: String,
 }
+
+async fn myshare_list(
+    State(s): State<AppState>,
+    Query(q): Query<BrowseQuery>,
+) -> Result<Json<ListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let entries = s.inner.share.list(&q.path).map_err(share_err)?;
+    Ok(Json(ListResponse {
+        path: q.path,
+        entries,
+    }))
+}
+
+async fn myshare_delete(
+    State(s): State<AppState>,
+    Query(q): Query<BrowseQuery>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    s.inner.share.delete(&q.path).map_err(share_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Open the share folder in Windows Explorer (convenient for dropping
+/// files in). No-op on other platforms.
+async fn myshare_reveal(State(s): State<AppState>) -> StatusCode {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(s.inner.share.root())
+            .spawn();
+    }
+    StatusCode::NO_CONTENT
+}
+
+// ---- Browse proxy ----
 
 async fn browse_list(
     State(s): State<AppState>,

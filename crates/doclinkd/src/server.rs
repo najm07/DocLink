@@ -1,5 +1,6 @@
-//! Data plane (LAN-facing): node info, authenticated share listing and
-//! download, and the pairing workflow. See docs/protocol.md.
+//! Data plane (LAN-facing): node info, authenticated + scope-filtered
+//! share listing and download, and the pairing workflow.
+//! See docs/protocol.md.
 
 use crate::auth;
 use crate::config::Config;
@@ -12,8 +13,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use doclink_core::identity::NodeIdentity;
 use doclink_core::protocol::{
-    canonical_decision_string, canonical_request_string, ErrorResponse, ListResponse, NodeInfo,
-    PairDecision, PairRequest, PairStatus, PairStatusResponse,
+    canonical_decision_string, canonical_request_string, EntryKind, ErrorResponse, ListResponse,
+    NodeInfo, PairDecision, PairRequest, PairStatus, PairStatusResponse,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -86,6 +87,39 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorRes
     )
 }
 
+// ---- Grant path scoping ----
+
+/// true if `path` lies strictly inside `ancestor` (forward-slash paths).
+fn within(path: &str, ancestor: &str) -> bool {
+    !ancestor.is_empty()
+        && path.len() > ancestor.len()
+        && path.starts_with(ancestor)
+        && path.as_bytes()[ancestor.len()] == b'/'
+}
+
+/// May this grantee list directory `dir`? Allowed when the grant covers
+/// everything, when listing the root, when the dir is inside a granted
+/// path, or when a granted path lives inside the dir (so the grantee can
+/// navigate down to it — entries are filtered afterwards).
+fn can_list(paths: &[String], dir: &str) -> bool {
+    paths.is_empty()
+        || dir.is_empty()
+        || paths.iter().any(|p| dir == *p || within(dir, p) || within(p, dir))
+}
+
+/// May this grantee download file `file`?
+fn can_read_file(paths: &[String], file: &str) -> bool {
+    paths.is_empty() || paths.iter().any(|p| file == *p || within(file, p))
+}
+
+/// Is a listing entry visible to a scoped grantee? The item itself, or a
+/// directory that contains (or is contained by) a granted path.
+fn entry_visible(paths: &[String], path: &str, kind: EntryKind) -> bool {
+    paths.iter().any(|p| {
+        path == *p || within(path, p) || (kind == EntryKind::Dir && within(p, path))
+    })
+}
+
 /// Unauthenticated: needed so a requester can verify a pairing target's identity.
 async fn info(State(s): State<AppState>) -> Json<NodeInfo> {
     Json(s.inner.node.clone())
@@ -104,16 +138,22 @@ async fn list(
     Query(q): Query<PathQuery>,
 ) -> Result<Json<ListResponse>, StatusCode> {
     let path_q = format!("/v1/list?path={}", urlencoding::encode(&q.path));
-    auth::require_auth(&headers, "GET", &path_q, b"", &s)?;
-    let entries = s
+    let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)?;
+    if !can_list(&grant.paths, &q.path) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut entries = s
         .inner
         .share
         .list(&q.path)
         .map_err(|e| match e {
             ShareError::NotFound(_) => StatusCode::NOT_FOUND,
-            ShareError::OutsideRoot => StatusCode::FORBIDDEN,
+            ShareError::OutsideRoot | ShareError::IsRoot => StatusCode::FORBIDDEN,
             ShareError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         })?;
+    if !grant.paths.is_empty() {
+        entries.retain(|e| entry_visible(&grant.paths, &e.path, e.kind));
+    }
     Ok(Json(ListResponse {
         path: q.path,
         entries,
@@ -126,10 +166,13 @@ async fn file(
     Query(q): Query<PathQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let path_q = format!("/v1/file?path={}", urlencoding::encode(&q.path));
-    auth::require_auth(&headers, "GET", &path_q, b"", &s)?;
+    let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)?;
+    if !can_read_file(&grant.paths, &q.path) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let path = s.inner.share.resolve(&q.path).map_err(|e| match e {
         ShareError::NotFound(_) => StatusCode::NOT_FOUND,
-        ShareError::OutsideRoot => StatusCode::FORBIDDEN,
+        ShareError::OutsideRoot | ShareError::IsRoot => StatusCode::FORBIDDEN,
         ShareError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
     })?;
     // TODO(M3): stream with tokio::fs::File + Range header support
@@ -273,6 +316,7 @@ pub fn apply_decision(
         name: pending.name.clone(),
         granted_unix: now,
         expires_unix: expires,
+        paths: Vec::new(), // new grants start with full access; scope via admin plane
     };
     let mut g = grants.lock().unwrap();
     g.data_mut().upsert(grant);

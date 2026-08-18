@@ -197,7 +197,7 @@ aside {
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
   text-decoration: none; display: inline-flex; align-items: center;
 }
-.block .actions button:hover, .iacts a:hover { background: var(--hover); }
+.block .actions button:hover, .iacts a:hover, .iacts button:hover { background: var(--hover); }
 .danger { color: var(--danger) !important; }
 button.text { border: 0; background: transparent; height: 22px; }
 
@@ -232,7 +232,7 @@ button.text { border: 0; background: transparent; height: 22px; }
 
 .grid-head, .item {
   display: grid;
-  grid-template-columns: 1fr 88px 170px 148px;
+  grid-template-columns: 1fr 88px 170px 160px;
   gap: 8px;
   align-items: center;
   padding: 0 12px;
@@ -260,6 +260,50 @@ button.text { border: 0; background: transparent; height: 22px; }
   margin: 24px 16px;
   color: var(--muted);
 }
+
+/* ---- side panel (share item / access editor) ---- */
+.share-panel {
+  position: fixed;
+  top: calc(var(--title-h) + 1px);
+  right: 0;
+  bottom: var(--status-h);
+  width: 320px;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+}
+.sp-head {
+  height: 35px;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+.sp-body {
+  flex: 1; overflow: auto;
+  padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.sp-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
+.sp-mode { display: flex; flex-direction: column; gap: 4px; }
+.sp-mode label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.sp-actions { margin-top: auto; display: flex; justify-content: flex-end; gap: 6px; }
+button.primary {
+  background: var(--accent); color: #fff; border: 0;
+  height: 24px; padding: 0 12px;
+}
+.gtree {
+  border: 1px solid var(--line); background: var(--bg);
+  max-height: 260px; overflow: auto; padding: 4px 0;
+}
+.gnode { display: flex; align-items: center; gap: 6px; height: 22px; padding-right: 8px; }
+.gnode:hover { background: var(--hover); }
+.tw {
+  width: 16px; border: 0; background: transparent;
+  color: var(--muted); padding: 0; font-size: 10px;
+}
+.gname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- status bar ---- */
 .statusbar {

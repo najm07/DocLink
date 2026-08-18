@@ -20,13 +20,15 @@ v0.2 introduces the **pairing trust model** (AnyDesk/TeamViewer style):
   until revoked). Approvals persist; expiry and revocation are enforced
   on every request.
 - All peer traffic after pairing is **signature-authenticated**.
+- Grants may be **scoped**: full access, or an explicit list of files and
+  folders the grantee can see.
 
 Two HTTP planes per node:
 
 | Plane | Bind | Purpose |
 |---|---|---|
 | Data | `0.0.0.0:37655` | Peer-facing: info, pairing, authenticated list/file |
-| Admin | `127.0.0.1:37656` | Localhost-only: window UI, contacts, approvals, revocation, browse proxy |
+| Admin | `127.0.0.1:37656` | Localhost-only: window UI, contacts, approvals, revocation, scoping, own-share management, browse proxy |
 
 Management operations are unreachable from the LAN by construction.
 
@@ -102,15 +104,26 @@ Verification rules (publisher MUST enforce):
 | Endpoint | Auth | Response |
 |---|---|---|
 | `GET /v1/info` | none | `NodeInfo` (needed to verify pairing targets) |
-| `GET /v1/list?path=<rel>` | required | `ListResponse` |
+| `GET /v1/list?path=<rel>` | required | `ListResponse`, scope-filtered |
 | `GET /v1/file?path=<rel>` | required | file bytes, `Content-Disposition: attachment` |
 | `POST /v1/pair/request` | self-signed body | `PairStatusResponse` |
 | `POST /v1/pair/decision` | self-signed body | `204` |
 | `GET /v1/pair/status` | none | `PairStatusResponse` |
 
-Path rules are unchanged from v0.1: no absolute paths, no `..`, no drive
-prefixes; canonicalized paths must stay under the share root (`403`),
-missing paths `404`. Errors carry `{ "error": "<message>" }`.
+Path rules: no absolute paths, no `..`, no drive prefixes; canonicalized
+paths must stay under the share root (`403`), missing paths `404`.
+Errors carry `{ "error": "<message>" }`.
+
+### Grant scoping
+
+Each grant carries `paths: []`:
+
+- **Empty** — full access to the whole share.
+- **Non-empty** — the grantee sees only the listed files/folders.
+  Listing a directory is allowed when it is inside a granted path or
+  contains one (entries are then filtered to visible items). Downloading
+  a file is allowed only when the file equals or lies inside a granted
+  path. Anything else → `403`.
 
 ## 7. Admin endpoints (admin plane, localhost only)
 
@@ -121,16 +134,22 @@ missing paths `404`. Errors carry `{ "error": "<message>" }`.
 | `DELETE /v1/admin/contacts/{id}` | Remove a contact |
 | `GET /v1/admin/requests` | Incoming pending pair requests |
 | `POST /v1/admin/requests/{id}/decision` | Approve (with duration) or deny |
-| `GET /v1/admin/grants` | Grants this node has issued |
+| `GET /v1/admin/grants` | Grants this node has issued (with scopes) |
+| `PUT /v1/admin/grants/{fingerprint}` | Set a grant's scope (`{ "paths": [...] }`, empty = full) |
 | `DELETE /v1/admin/grants/{fingerprint}` | Revoke a grant |
+| `POST /v1/admin/share-item` | Add/remove one path across grants (`{ path, fingerprints }`) |
+| `GET /v1/admin/myshare/list?path=` | List my own share (owner view) |
+| `DELETE /v1/admin/myshare?path=` | Delete a file/folder from my share |
+| `POST /v1/admin/myshare/reveal` | Open the share folder in Explorer |
 | `GET /v1/admin/browse/{id}/list\|file` | Signed proxy to a contact's share |
 
 ## 8. Grants
 
-Grants are keyed by the requester's fingerprint, carry `granted_unix` and
-optional `expires_unix` (`null` = until revoked), and are re-checked on
-every authenticated request. Expired grants are swept every 60 s.
-Revocation is immediate: the next request from that node fails with `403`.
+Grants are keyed by the requester's fingerprint, carry `granted_unix`,
+optional `expires_unix` (`null` = until revoked), and `paths` (scope).
+They are re-checked on every authenticated request. Expired grants are
+swept every 60 s. Revocation and scope changes are immediate: the next
+request from that node reflects them.
 
 ## 9. Security notes
 

@@ -1,6 +1,7 @@
 //! Tiny JSON-file stores with atomic writes. Grants (who may read my
-//! share) and contacts (PCs I have added) are small enough that a
-//! full-file rewrite on change is simpler and safer than a database.
+//! share, and which parts of it) and contacts (PCs I have added) are
+//! small enough that a full-file rewrite on change is simpler and
+//! safer than a database.
 
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -17,6 +18,11 @@ pub struct Grant {
     pub granted_unix: u64,
     /// None = until revoked.
     pub expires_unix: Option<u64>,
+    /// Access scope: empty = the whole share; otherwise only these
+    /// relative paths (files or folders) are visible to the grantee.
+    /// Defaults to empty so pre-scope grant files keep full access.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

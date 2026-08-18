@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
     let grants = store::open(&cfg.grants_path())?;
     let contacts = store::open(&cfg.contacts_path())?;
     let pairing = server::PairingState::default();
+    let admin_share = share::ShareRoot::new(&cfg.share_root).context("opening share root")?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -70,7 +71,7 @@ async fn main() -> Result<()> {
     ));
     tokio::spawn(store::run_expiry_sweeper(grants.clone(), shutdown_rx));
 
-    // Data plane: LAN-facing, signature-authenticated, read-only.
+    // Data plane: LAN-facing, signature-authenticated, read-only, scope-filtered.
     let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), pairing.clone());
     let data_app = server::router(data_state);
     let data_addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
@@ -78,7 +79,15 @@ async fn main() -> Result<()> {
     info!(%data_addr, "share API (peer-facing) listening");
 
     // Admin plane: localhost only — window UI, contacts, approvals, proxy.
-    let admin_state = admin::AppState::new(node, identity, registry, grants, contacts, pairing);
+    let admin_state = admin::AppState::new(
+        node,
+        identity,
+        registry,
+        grants,
+        contacts,
+        pairing,
+        admin_share,
+    );
     let admin_app = admin::router(admin_state);
     let admin_addr = std::net::SocketAddr::from(([127, 0, 0, 1], http_port + 1));
     let admin_tcp = tokio::net::TcpListener::bind(admin_addr).await?;

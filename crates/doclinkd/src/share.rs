@@ -15,6 +15,8 @@ pub enum ShareError {
     OutsideRoot,
     #[error("path not found: {0}")]
     NotFound(String),
+    #[error("path is the share root")]
+    IsRoot,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -31,6 +33,10 @@ impl ShareRoot {
         Ok(Self {
             root: root.canonicalize()?,
         })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Resolve a client-supplied relative path to a real path that is
@@ -87,5 +93,24 @@ impl ShareRoot {
         // Directories first, then alphabetical.
         entries.sort_by_key(|e| (e.kind == EntryKind::File, e.name.to_lowercase()));
         Ok(entries)
+    }
+
+    /// Owner-side management: delete a file or folder from the share.
+    /// The share root itself cannot be deleted.
+    pub fn delete(&self, rel: &str) -> Result<(), ShareError> {
+        if rel.is_empty() {
+            return Err(ShareError::IsRoot);
+        }
+        let path = self.resolve(rel)?;
+        if path == self.root {
+            return Err(ShareError::IsRoot);
+        }
+        let meta = std::fs::metadata(&path)?;
+        if meta.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+        Ok(())
     }
 }
