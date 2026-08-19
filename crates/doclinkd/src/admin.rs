@@ -4,6 +4,7 @@
 //! operations are unreachable from the network.
 
 use crate::proxy::{self, ProxyError};
+use crate::scan;
 use crate::server::{self, PairingState};
 use crate::share::{ShareError, ShareRoot};
 use crate::store::{Contact, ContactsFile, Grant, GrantsFile, SharedStore};
@@ -15,8 +16,8 @@ use axum::{Json, Router};
 use doclink_core::discovery::PeerRegistry;
 use doclink_core::identity::NodeIdentity;
 use doclink_core::protocol::{
-    canonical_request_string, ContactInfo, ErrorResponse, GrantInfo, ListResponse, NodeInfo,
-    PairRequest, PairStatus, PairStatusResponse,
+    canonical_decision_string, canonical_request_string, ContactInfo, ErrorResponse, GrantInfo,
+    ListResponse, NodeInfo, PairDecision, PairRequest, PairStatus, PairStatusResponse,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -66,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/info", get(info))
         .route("/v1/admin/contacts", get(list_contacts).post(add_contact))
         .route("/v1/admin/contacts/{node_id}", delete(remove_contact))
+        .route("/v1/admin/contacts/{node_id}/status", get(contact_status))
         .route("/v1/admin/requests", get(list_requests))
         .route("/v1/admin/requests/{node_id}/decision", post(decide_request))
         .route("/v1/admin/grants", get(list_grants))
@@ -319,6 +321,42 @@ async fn remove_contact(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Proxy to the data-plane `/v1/pair/status` for a contact. Lets the UI
+/// poll the requester's view without CORS or port-crossing.
+async fn contact_status(
+    State(s): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<PairStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Find the contact to get its host (manual or from mDNS).
+    let contacts = s.inner.contacts.lock().unwrap().read().clone();
+    let Some(contact) = contacts
+        .contacts
+        .iter()
+        .find(|c| c.node_id == node_id)
+    else {
+        return Err(err(StatusCode::NOT_FOUND, "unknown contact"));
+    };
+    let base = if let Some(h) = &contact.host {
+        format!("http://{h}")
+    } else {
+        // Try to find the peer via mDNS registry.
+        let peers = s.inner.peers.snapshot();
+        if let Some(p) = peers.iter().find(|p| p.node_id == node_id) {
+            format!("http://{}:{}", p.addr, p.http_port)
+        } else {
+            return Err(err(StatusCode::NOT_FOUND, "peer not currently reachable"));
+        }
+    };
+    let url = format!("{base}/v1/pair/status?node_id={}", s.inner.node.node_id);
+    let status: PairStatusResponse = reqwest::get(&url)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("peer unreachable: {e}")))?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("bad peer response: {e}")))?;
+    Ok(Json(status))
+}
+
 // ---- Incoming requests & grants ----
 
 async fn list_requests(State(s): State<AppState>) -> Json<Vec<PairRequest>> {
@@ -340,6 +378,9 @@ struct DecisionBody {
     duration_secs: u64, // 0 = until revoked
 }
 
+/// Approve or deny an incoming pair request. On approve, the grant is
+/// created and the signed decision is pushed to the requester (via mDNS
+/// registry or active probe), so its contact status updates immediately.
 async fn decide_request(
     State(s): State<AppState>,
     Path(node_id): Path<String>,
@@ -353,7 +394,73 @@ async fn decide_request(
         body.duration_secs,
     )
     .map_err(|e| err(StatusCode::NOT_FOUND, e))?;
+
+    // Push the decision to the requester so its contact row updates.
+    if body.decision == "approve" {
+        let _ = push_decision_to_requester(&s, &node_id, &body).await;
+    }
+
     Ok(Json(resp))
+}
+
+/// Find the requester (mDNS registry or active probe) and POST the signed
+/// decision so its `/v1/pair/status` returns `approved` immediately.
+async fn push_decision_to_requester(
+    s: &AppState,
+    requester_node_id: &str,
+    body: &DecisionBody,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    // Find the requester via mDNS registry first.
+    let base = {
+        let peers = s.inner.peers.snapshot();
+        if let Some(p) = peers.iter().find(|p| p.node_id == requester_node_id) {
+            format!("http://{}:{}", p.addr, p.http_port)
+        } else if let Some(h) = s
+            .inner
+            .contacts
+            .lock()
+            .unwrap()
+            .read()
+            .contacts
+            .iter()
+            .find(|c| c.node_id == requester_node_id)
+            .and_then(|c| c.host.clone())
+        {
+            format!("http://{h}")
+        } else {
+            // Fallback: active probe (same as Add PC).
+            if let Some(b) = crate::scan::find_node(requester_node_id).await {
+                b
+            } else {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "requester not found on the LAN — decision will apply locally",
+                ));
+            }
+        }
+    };
+
+    // Build and sign the decision.
+    let decision = PairDecision {
+        requester_node_id: requester_node_id.to_string(),
+        decision: body.decision.clone(),
+        duration_secs: body.duration_secs,
+        pubkey_hex: hex::encode(s.inner.identity.verifying_key().as_bytes()),
+        signature: String::new(),
+    };
+    let signature = hex::encode(
+        s.inner
+            .identity
+            .sign(canonical_decision_string(&decision).as_bytes())
+            .to_bytes(),
+    );
+    let decision = PairDecision { signature, ..decision };
+
+    // POST to the requester's data plane.
+    let client = reqwest::Client::new();
+    let url = format!("{base}/v1/pair/decision");
+    let _ = client.post(&url).json(&decision).send().await;
+    Ok(())
 }
 
 async fn list_grants(State(s): State<AppState>) -> Json<Vec<GrantInfo>> {

@@ -3,7 +3,7 @@
 //! Every authenticated peer request carries four headers:
 //!   x-doclink-node:  caller's node_id
 //!   x-doclink-pub:   caller's ed25519 public key, hex
-//!   x-doclink-ts:    unix timestamp (±5 min replay window)
+//!   x-doclink-ts:    unix timestamp (士5 min replay window)
 //!   x-doclink-sig:   signature over "<METHOD>\n<PATH>?<QUERY>\n<TS>\n<BODY>"
 //!
 //! The caller must hold a live grant: sha256(pubkey) must equal the

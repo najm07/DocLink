@@ -8,22 +8,22 @@ Trust model (v0.2): AnyDesk-style pairing. PCs are added by DocLink ID,
 approved once by the sharing PC with a granting period, and revocable at
 any time. Grants can be scoped to specific files/folders.
 
-## M0 — Scaffold
+## M0 — Scaffold (done)
 
 - [x] Cargo workspace: `doclink-core` + `doclinkd`
 - [x] Protocol types, ed25519 identity, UDP discovery skeleton
 - [x] axum share server with path-traversal-safe read-only share root
 - [x] Web UI placeholder served by the daemon
-- [x] First `cargo build` green (ed25519 rand_core feature, PeerRegistry::new)
+- [x] First `cargo build` green
 
-## M1 — Local end-to-end
+## M1 — Local end-to-end (done)
 
-- [ ] Run daemon, browse own share in the web UI, download a file
-- [ ] `doclink.toml` config loading verified on Windows
-- [ ] Unit tests: `ShareRoot::resolve` rejects `..`, absolute paths, symlinks
-- [ ] Unit tests: grant scoping (can_list / can_read_file / entry_visible)
+- [x] Run daemon, browse own share in the web UI, download a file
+- [x] `doclink.toml` config loading verified on Windows
+- [x] Unit tests: `ShareRoot::resolve` rejects `..`, absolute paths, symlinks
+- [x] Unit tests: grant scoping (`can_list` / `can_read_file` / `entry_visible`)
 
-## M2 — Pairing and trust (v0.2)
+## M2 — Pairing and trust (v0.2) (done)
 
 - [x] DocLink ID displayed in the window (grouped hex, click to copy)
 - [x] Add PC by ID + alias (+ manual host:port fallback for filtered subnets)
@@ -37,6 +37,8 @@ any time. Grants can be scoped to specific files/folders.
 - [x] Loopback beacons: same-machine instances discover each other
 - [x] `--port` flag for a second same-PC instance
 - [x] Scoped grants: share one file or subfolder with specific PCs only
+- [x] mDNS discovery (Zeroconf) like PrintLink, with active probing fallback
+- [x] Pairing decision push + requester polling (contact status updates immediately)
 - [ ] Two-node verification on the office LAN (firewall rules for 37654/37655)
 
 ## M3 — Actions and polish
@@ -48,8 +50,7 @@ any time. Grants can be scoped to specific files/folders.
 - [x] My Share view: browse/manage own share, delete items, reveal in Explorer
 - [x] Share… panel per item; Access editor per grant (Everything / selected items)
 - [ ] Streaming downloads + `Range` support (no whole-file buffering)
-- [ ] Print button: download to temp, then Windows shell `print` verb
-      via windows-rs (`ShellExecuteEx`)
+- [ ] Print button: download to temp, then Windows shell `print` verb via windows-rs (`ShellExecuteEx`)
 - [ ] Toast notifications (pair request received, grant expiring soon)
 - [ ] Graceful shutdown (Ctrl-C / service stop)
 - [ ] Contact status refresh (re-poll pair/status, surface expiry)
@@ -62,9 +63,16 @@ any time. Grants can be scoped to specific files/folders.
 - [ ] Proper installer (MSI via cargo-wix, mirror Printlink's approach)
 - [ ] Autostart on login (registry Run key or Scheduled Task)
 
-## Post-v1 ideas
+## M5 — Discovery mode (network PC browser)
 
-- Print-on-host through PrintLink interop
-- WebDAV facade (mount a peer's share as a drive letter)
-- Search across all granted peers
-- `Inbox/` write support (upload into a peer's drop folder)
+- [ ] New **Network** view that lists all PCs on the LAN currently running DocLink (from beacons)
+- [ ] One-click **Add** from the discovery list (no need to paste the ID)
+- [ ] Settings toggle **Hide this PC from discovery** (beacon suppression) so a PC can stay invisible while still adding others
+- [ ] Respect the hide setting in `doclink.toml` / UI
+
+### Post-v1 ideas
+
+- [ ] Print-on-host through PrintLink interop
+- [ ] WebDAV facade (mount a peer's share as a drive letter)
+- [ ] Search across all granted peers
+- [ ] `Inbox/` write support (upload into a peer's drop folder)
