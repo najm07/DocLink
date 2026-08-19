@@ -10,12 +10,12 @@
 //! can be disabled (via config) so a PC can stay hidden while still adding
 //! others.
 
-use crate::protocol::{Beacon, Peer, BEACON_INTERVAL_SECS, DISCOVERY_PORT, PEER_TTL_SECS};
-use mdns::{ServiceDaemon, ServiceInfo};
+use crate::protocol::{Peer, PEER_TTL_SECS};
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MDNS_SERVICE_TYPE: &str = "_doclink._tcp.local.";
 
@@ -109,12 +109,12 @@ pub async fn run_browser(
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
                 while let Ok(event) = rx.try_recv() {
-                    use mdns::ServiceEvent::*;
+                    use mdns_sd::ServiceEvent::*;
                     match event {
                         ServiceFound(info) | ServiceResolved(info) => {
-                            let Some(props) = info.get_properties() else { continue };
+                            let props = info.get_properties();
                             let Some(node_id) = props.get("node_id").map(|s| s.to_string()) else { continue };
                             if node_id == self_node_id {
                                 continue;
@@ -122,7 +122,7 @@ pub async fn run_browser(
                             let http_port = props
                                 .get("http_port")
                                 .and_then(|s| s.parse::<u16>().ok())
-                                .unwrap_or(DISCOVERY_PORT + 1);
+                                .unwrap_or(37656);
                             let addr = info.get_addresses().iter().next().map(|a| a.to_string());
                             if let Some(addr) = addr {
                                 registry.upsert(Peer {
