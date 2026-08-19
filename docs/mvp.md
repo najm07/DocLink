@@ -49,6 +49,7 @@ any time. Grants can be scoped to specific files/folders.
 - [x] VS Code-style workbench chrome (frameless window, activity bar, status bar)
 - [x] My Share view: browse/manage own share, delete items, reveal in Explorer
 - [x] Share… panel per item; Access editor per grant (Everything / selected items)
+- [x] Tray icon: × hides to tray; right-click Open / Quit
 - [ ] Streaming downloads + `Range` support (no whole-file buffering)
 - [ ] Print button: download to temp, then Windows shell `print` verb via windows-rs (`ShellExecuteEx`)
 - [ ] Toast notifications (pair request received, grant expiring soon)

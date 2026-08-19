@@ -2,21 +2,25 @@
 //!
 //! Frameless on purpose — the web UI draws a VS Code-style title bar
 //! and talks to this process over IPC (drag / min / max / close).
-//! Closing the window does NOT stop the daemon.
+//! Closing the window hides it to tray; the daemon keeps running.
+//! Right-click the tray icon to Open or Quit.
 
 #![windows_subsystem = "windows"]
 
 use std::fs::File;
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::{
     dpi::LogicalSize,
-    event::{Event, WindowEvent},
+    event::{Event, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
     window::WindowBuilder,
 };
 use wry::WebViewBuilder;
+use wry::Rect;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -31,9 +35,9 @@ fn admin_up() -> bool {
     TcpStream::connect(ADMIN_ADDR).is_ok()
 }
 
-fn ensure_daemon() {
+fn ensure_daemon() -> Option<Child> {
     if admin_up() {
-        return;
+        return None; // already running (e.g. from a previous window)
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -51,25 +55,74 @@ fn ensure_daemon() {
                         cmd.stderr(Stdio::from(err));
                     }
                 }
-                let _ = cmd.spawn();
+                if let Ok(child) = cmd.spawn() {
+                    // Wait up to 15 s for the admin plane to become reachable.
+                    let deadline = Instant::now() + Duration::from_secs(15);
+                    while Instant::now() < deadline {
+                        if admin_up() {
+                            return Some(child);
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
             }
         }
     }
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if admin_up() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    None
+}
+
+#[cfg(windows)]
+fn run_tray(event_loop: &tao::event_loop::EventLoop<String>, proxy: tao::event_loop::EventLoopProxy<String>) {
+    use tao::platform::windows::EventLoopBuilderExtWindows;
+    use tray_icon::{
+        menu::{Menu, MenuItem},
+        TrayIconBuilder,
+    };
+    let icon = load_icon();
+    let menu = Menu::new();
+    let open = MenuItem::new("Open", true, None);
+    let quit = MenuItem::new("Quit", true, None);
+    menu.append(&open).unwrap();
+    menu.append(&quit).unwrap();
+    let _tray = TrayIconBuilder::new()
+        .with_icon(icon)
+        .with_tooltip("DocLink")
+        .with_menu_on_left_click(false)
+        .with_menu(Box::new(menu))
+        .build()
+        .unwrap();
+    let open_proxy = proxy.clone();
+    let quit_proxy = proxy.clone();
+    open.register_action(move |_| {
+        let _ = open_proxy.send_event("open".to_string());
+    });
+    quit.register_action(move |_| {
+        let _ = quit_proxy.send_event("quit".to_string());
+    });
+}
+
+#[cfg(windows)]
+fn load_icon() -> tray_icon::Icon {
+    let icon = include_bytes!("../../assets/icon.ico");
+    let (width, height) = (32, 32);
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    // Simple blue square icon (fallback if no .ico).
+    for _ in 0..(width * height) {
+        rgba.extend_from_slice(&[0x00, 0x78, 0xd4, 0xFF]);
     }
+    tray_icon::Icon::from_rgba(rgba, width, height).unwrap_or_else(|_| {
+        tray_icon::Icon::from_file_bytes(icon).unwrap()
+    })
 }
 
 fn main() -> wry::Result<()> {
-    ensure_daemon();
+    let _child = ensure_daemon();
 
-    // tao 0.30: user events live on EventLoopBuilder, not EventLoop::with_user_event.
     let event_loop = EventLoopBuilder::<String>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+
+    #[cfg(windows)]
+    run_tray(&event_loop, proxy.clone());
 
     let window = WindowBuilder::new()
         .with_title("DocLink")
@@ -86,22 +139,44 @@ fn main() -> wry::Result<()> {
         })
         .build(&window)?;
 
+    let visible = Arc::new(AtomicBool::new(true));
+    let visible_clone = visible.clone();
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
+            Event::NewEvents(StartCause::Init) => {
+                // Window starts visible.
+            }
             Event::UserEvent(cmd) => match cmd.as_str() {
                 "drag" => {
                     let _ = window.drag_window();
                 }
                 "minimize" => window.set_minimized(true),
                 "maximize" => window.set_maximized(!window.is_maximized()),
-                "close" => *control_flow = ControlFlow::Exit,
+                "close" => {
+                    // Hide to tray instead of exiting.
+                    window.set_visible(false);
+                    visible_clone.store(false, Ordering::SeqCst);
+                }
+                "open" => {
+                    window.set_visible(true);
+                    window.set_focus();
+                    visible_clone.store(true, Ordering::SeqCst);
+                }
+                "quit" => {
+                    *control_flow = ControlFlow::Exit;
+                }
                 _ => {}
             },
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => *control_flow = ControlFlow::Exit,
+            } => {
+                // Intercept × and hide to tray.
+                window.set_visible(false);
+                visible_clone.store(false, Ordering::SeqCst);
+            }
             _ => {}
         }
     });
