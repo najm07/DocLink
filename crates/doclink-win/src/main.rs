@@ -73,7 +73,7 @@ fn ensure_daemon() -> Option<Child> {
 #[cfg(windows)]
 fn run_tray(event_loop: &tao::event_loop::EventLoop<String>, proxy: tao::event_loop::EventLoopProxy<String>) {
     use tray_icon::{
-        menu::{Menu, MenuItem, PredefinedMenuItem},
+        menu::{Menu, MenuItem},
         TrayIconBuilder,
     };
     let icon = load_icon();
@@ -81,7 +81,6 @@ fn run_tray(event_loop: &tao::event_loop::EventLoop<String>, proxy: tao::event_l
     let open = MenuItem::new("Open", true, None);
     let quit = MenuItem::new("Quit", true, None);
     menu.append(&open).unwrap();
-    menu.append(&PredefinedMenuItem::separator().unwrap());
     menu.append(&quit).unwrap();
     let _tray = TrayIconBuilder::new()
         .with_icon(icon)

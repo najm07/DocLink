@@ -121,7 +121,7 @@ pub async fn run_browser(
                             }
                             let http_port = props
                                 .get("http_port")
-                                .and_then(|s| s.parse::<u16>().ok())
+                                .and_then(|p| p.val_str().map(|s| s.parse::<u16>().ok()).flatten())
                                 .unwrap_or(37656);
                             let addr = info.get_addresses().iter().next().map(|a| a.to_string());
                             if let Some(addr) = addr {
