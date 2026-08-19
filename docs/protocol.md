@@ -41,11 +41,24 @@ presented anywhere MUST hash-match its accompanying public key.
 
 ## 3. Discovery
 
-Unchanged from v0.1: JSON `Beacon` via UDP broadcast to port 37654 every
-5 s, TTL 20 s. Discovery is only an **address book** — it resolves a
-DocLink ID to a current IP and shows online/offline. It grants no trust.
-A contact may carry a manual `host:port` fallback for peers beacons
-cannot reach (different subnet, broadcast filtered).
+JSON `Beacon` via UDP to port 37654 every 5 s, TTL 20 s. Because a plain
+broadcast to `255.255.255.255` is unreliable on machines with virtual
+adapters (Windows may route it out a Hyper-V/WSL/VPN NIC), beacons are
+sent to **three** destinations:
+
+1. `255.255.255.255` (limited broadcast)
+2. the **subnet-directed broadcast** of the primary interface, assuming
+   a /24 (e.g. `192.168.1.255`) — routed via the correct adapter
+3. `127.0.0.1` (loopback, so same-machine instances find each other)
+
+When beacons still can't get through (broadcast filtered by the switch or
+AP), nodes fall back to **active probing**: `GET /v1/info` against every
+address of the primary /24 until the target `node_id` answers. Both
+mechanisms are confined to the local subnet; a contact may carry a manual
+`host:port` fallback for peers on another subnet.
+
+Discovery is only an **address book** — it resolves a DocLink ID to a
+current IP and shows online/offline. It grants no trust.
 
 ## 4. Authentication
 

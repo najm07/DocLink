@@ -182,13 +182,15 @@ struct AddContactBody {
     duration_secs: u64,
 }
 
-/// How long to wait for a beacon from the target before giving up.
+/// How long to wait for a beacon from the target before falling back to
+/// an active subnet probe.
 const DISCOVERY_WAIT: Duration = Duration::from_secs(6);
 
-/// Add a PC by DocLink ID: locate it via discovery (waiting a few
-/// seconds if needed), verify its identity, send a signed pair request,
-/// persist the contact. A manual host:port remains as a fallback for
-/// subnets where broadcast beacons are filtered.
+/// Add a PC by DocLink ID: locate it via discovery (waiting for beacons,
+/// then actively probing the local subnet when beacons can't get
+/// through), verify its identity, send a signed pair request, persist
+/// the contact. A manual host:port remains as the last-resort fallback
+/// for peers on a different subnet.
 async fn add_contact(
     State(s): State<AppState>,
     Json(body): Json<AddContactBody>,
@@ -221,12 +223,19 @@ async fn add_contact(
             }
             tokio::time::sleep(Duration::from_millis(400)).await;
         }
+        if found.is_none() {
+            // Beacons never arrived (broadcast filtered or sent out a
+            // virtual NIC): actively probe the local subnet, PrintLink-style.
+            if let Some(base) = crate::scan::find_node(&body.node_id).await {
+                found = Some((base, String::new()));
+            }
+        }
         found
     };
     let Some((base, discovered_fp)) = target else {
         return Err(err(
             StatusCode::NOT_FOUND,
-            "peer not seen on the LAN yet — check it is running DocLink and that the firewall allows port 37654/udp, then try again",
+            "peer not found on the LAN — check it is running DocLink and that both PCs are on the same subnet, or set Host (optional) to its IP:port (e.g. 192.168.1.20:37655)",
         ));
     };
 

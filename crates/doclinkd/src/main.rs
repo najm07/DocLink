@@ -2,6 +2,7 @@ mod admin;
 mod auth;
 mod config;
 mod proxy;
+mod scan;
 mod server;
 mod share;
 mod store;
