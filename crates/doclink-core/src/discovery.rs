@@ -11,8 +11,8 @@
 //! others.
 
 use crate::protocol::{Peer, PEER_TTL_SECS};
-use mdns_sd::{ServiceDaemon, ServiceInfo, IntoTxtProperties};
-use std::collections::{HashMap, HashSet};
+use mdns_sd::{ServiceDaemon, ServiceInfo};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -112,17 +112,8 @@ pub async fn run_browser(
                 while let Ok(event) = rx.try_recv() {
                     use mdns_sd::ServiceEvent::*;
                     match event {
-                        ServiceFound(_, _) | ServiceResolved(_, _) => {
-                            // We only get useful data from ServiceResolved.
-                        }
-                        ServiceRemoved(_, _) => {}
-                        _ => {}
-                    }
-                }
-                // Also poll for resolved services separately.
-                if let Ok(mut iter) = daemon.browse(MDNS_SERVICE_TYPE) {
-                    while let Ok(event) = iter.try_recv() {
-                        if let ServiceResolved(info) = event {
+                        ServiceFound(_, _) | ServiceRemoved(_, _) => {}
+                        ServiceResolved(info) => {
                             let props = info.get_properties();
                             let Some(node_id) = props.get("node_id").map(|s| s.to_string()) else { continue };
                             if node_id == self_node_id {
@@ -144,6 +135,7 @@ pub async fn run_browser(
                                 });
                             }
                         }
+                        _ => {}
                     }
                 }
             }
