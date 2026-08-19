@@ -20,7 +20,6 @@ use tao::{
     window::WindowBuilder,
 };
 use wry::WebViewBuilder;
-use wry::Rect;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -73,9 +72,8 @@ fn ensure_daemon() -> Option<Child> {
 
 #[cfg(windows)]
 fn run_tray(event_loop: &tao::event_loop::EventLoop<String>, proxy: tao::event_loop::EventLoopProxy<String>) {
-    use tao::platform::windows::EventLoopBuilderExtWindows;
     use tray_icon::{
-        menu::{Menu, MenuItem},
+        menu::{Menu, MenuItem, PredefinedMenuItem},
         TrayIconBuilder,
     };
     let icon = load_icon();
@@ -83,6 +81,7 @@ fn run_tray(event_loop: &tao::event_loop::EventLoop<String>, proxy: tao::event_l
     let open = MenuItem::new("Open", true, None);
     let quit = MenuItem::new("Quit", true, None);
     menu.append(&open).unwrap();
+    menu.append(&PredefinedMenuItem::separator().unwrap());
     menu.append(&quit).unwrap();
     let _tray = TrayIconBuilder::new()
         .with_icon(icon)
@@ -103,16 +102,13 @@ fn run_tray(event_loop: &tao::event_loop::EventLoop<String>, proxy: tao::event_l
 
 #[cfg(windows)]
 fn load_icon() -> tray_icon::Icon {
-    let icon = include_bytes!("../../assets/icon.ico");
+    // Simple blue square icon (32x32).
     let (width, height) = (32, 32);
     let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    // Simple blue square icon (fallback if no .ico).
     for _ in 0..(width * height) {
         rgba.extend_from_slice(&[0x00, 0x78, 0xd4, 0xFF]);
     }
-    tray_icon::Icon::from_rgba(rgba, width, height).unwrap_or_else(|_| {
-        tray_icon::Icon::from_file_bytes(icon).unwrap()
-    })
+    tray_icon::Icon::from_rgba(rgba, width, height).unwrap()
 }
 
 fn main() -> wry::Result<()> {
@@ -132,12 +128,12 @@ fn main() -> wry::Result<()> {
         .build(&event_loop)
         .expect("failed to create window");
 
-    let _webview = WebViewBuilder::new()
+    let _webview = WebViewBuilder::new(&window)
         .with_url(ADMIN_URL)
         .with_ipc_handler(move |req| {
             let _ = proxy.send_event(req.body().clone());
         })
-        .build(&window)?;
+        .build()?;
 
     let visible = Arc::new(AtomicBool::new(true));
     let visible_clone = visible.clone();

@@ -11,8 +11,8 @@
 //! others.
 
 use crate::protocol::{Peer, PEER_TTL_SECS};
-use mdns_sd::{ServiceDaemon, ServiceInfo};
-use std::collections::HashMap;
+use mdns_sd::{ServiceDaemon, ServiceInfo, IntoTxtProperties};
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -73,17 +73,16 @@ pub fn start_advertiser(
     let daemon = ServiceDaemon::new().ok()?;
     let ip = primary_ipv4()?;
     let instance_name = format!("doclink-{}.{}", node_id, MDNS_SERVICE_TYPE);
-    let props = vec![
-        ("node_id".to_string(), node_id.to_string()),
-        ("http_port".to_string(), http_port.to_string()),
-    ];
+    let mut props = HashMap::new();
+    props.insert("node_id".to_string(), node_id.to_string());
+    props.insert("http_port".to_string(), http_port.to_string());
     let service = ServiceInfo::new(
         MDNS_SERVICE_TYPE,
         &instance_name,
         name,
         ip.to_string(),
         http_port,
-        Some(props),
+        props,
     )
     .ok()?;
     if daemon.register(service).is_err() {
@@ -113,7 +112,17 @@ pub async fn run_browser(
                 while let Ok(event) = rx.try_recv() {
                     use mdns_sd::ServiceEvent::*;
                     match event {
-                        ServiceFound(info) | ServiceResolved(info) => {
+                        ServiceFound(_, _) | ServiceResolved(_, _) => {
+                            // We only get useful data from ServiceResolved.
+                        }
+                        ServiceRemoved(_, _) => {}
+                        _ => {}
+                    }
+                }
+                // Also poll for resolved services separately.
+                if let Ok(mut iter) = daemon.browse(MDNS_SERVICE_TYPE) {
+                    while let Ok(event) = iter.try_recv() {
+                        if let ServiceResolved(info) = event {
                             let props = info.get_properties();
                             let Some(node_id) = props.get("node_id").map(|s| s.to_string()) else { continue };
                             if node_id == self_node_id {
@@ -135,7 +144,6 @@ pub async fn run_browser(
                                 });
                             }
                         }
-                        ServiceRemoved(_) => {}
                     }
                 }
             }
