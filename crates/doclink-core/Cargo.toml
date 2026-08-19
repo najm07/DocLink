@@ -1,20 +1,10 @@
 [package]
 name = "doclink-core"
-description = "Shared protocol, identity, and discovery types for DocLink"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
 
 [dependencies]
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
-ed25519-dalek = { workspace = true }
-rand = { workspace = true }
-urlencoding = { workspace = true }
-socket2 = { workspace = true }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"

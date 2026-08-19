@@ -182,15 +182,14 @@ struct AddContactBody {
     duration_secs: u64,
 }
 
-/// How long to wait for a beacon from the target before falling back to
-/// an active subnet probe.
-const DISCOVERY_WAIT: Duration = Duration::from_secs(6);
+/// How long to wait for mDNS resolution before falling back to active
+/// subnet probing.
+const DISCOVERY_WAIT: Duration = Duration::from_secs(3);
 
-/// Add a PC by DocLink ID: locate it via discovery (waiting for beacons,
-/// then actively probing the local subnet when beacons can't get
-/// through), verify its identity, send a signed pair request, persist
-/// the contact. A manual host:port remains as the last-resort fallback
-/// for peers on a different subnet.
+/// Add a PC by DocLink ID: resolve via mDNS (instant on most networks),
+/// then fall back to active /24 probing if needed, verify identity,
+/// send a signed pair request, persist the contact. A manual host:port
+/// remains as the last-resort fallback for peers on a different subnet.
 async fn add_contact(
     State(s): State<AppState>,
     Json(body): Json<AddContactBody>,
@@ -221,11 +220,10 @@ async fn add_contact(
             if Instant::now() >= deadline {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
         if found.is_none() {
-            // Beacons never arrived (broadcast filtered or sent out a
-            // virtual NIC): actively probe the local subnet, PrintLink-style.
+            // mDNS didn't surface the peer: actively probe the local subnet.
             if let Some(base) = crate::scan::find_node(&body.node_id).await {
                 found = Some((base, String::new()));
             }
@@ -252,7 +250,7 @@ async fn add_contact(
     if !discovered_fp.is_empty() && discovered_fp != remote_info.fingerprint {
         return Err(err(
             StatusCode::CONFLICT,
-            "fingerprint mismatch between beacon and /v1/info — possible spoofing",
+            "fingerprint mismatch between mDNS and /v1/info — possible spoofing",
         ));
     }
 

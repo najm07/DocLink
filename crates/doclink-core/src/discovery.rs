@@ -1,23 +1,23 @@
-//! UDP discovery: beacons announce presence; the registry tracks who is
-//! currently reachable. Discovery is only an address book — trust comes
-//! from pairing, not presence.
+//! mDNS discovery: advertise our presence and resolve other PCs' DocLink IDs
+//! to (ip, port) without any central server or static IPs. This is the same
+//! model that made PrintLink's discovery reliable on mixed networks.
 //!
-//! Beacons are announced to every plausible destination:
-//!   * 255.255.255.255 — limited broadcast; on machines with virtual NICs
-//!     (Hyper-V/WSL/VPN) Windows often routes this out the wrong adapter
-//!   * the /24 subnet-directed broadcast of the primary interface
-//!     (e.g. 192.168.1.255) — routed via the correct adapter, which is
-//!     how PrintLink's discovery reliably reached the LAN
-//!   * 127.0.0.1 — so same-machine instances (second node via --port)
-//!     can find each other
-//! The listener binds 0.0.0.0 with SO_REUSEADDR (and SO_REUSEPORT on
-//! unix) so several nodes can share one machine.
+//! Service type: _doclink._tcp.local
+//! Instance name: doclink-<node_id>._doclink._tcp.local
+//! Properties: node_id (hex), http_port (decimal)
+//!
+//! The browser runs continuously and updates the registry; the advertiser
+//! can be disabled (via config) so a PC can stay hidden while still adding
+//! others.
 
 use crate::protocol::{Beacon, Peer, BEACON_INTERVAL_SECS, DISCOVERY_PORT, PEER_TTL_SECS};
+use mdns::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub const MDNS_SERVICE_TYPE: &str = "_doclink._tcp.local.";
 
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -53,9 +53,7 @@ impl PeerRegistry {
     }
 }
 
-/// Primary interface IPv4, derived from the routing table. The UDP
-/// "connect" sends no packets — it just makes the OS pick the interface
-/// it would use for real traffic, which is almost always the LAN adapter.
+/// Primary interface IPv4, derived from the routing table.
 fn primary_ipv4() -> Option<Ipv4Addr> {
     let s = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     s.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
@@ -65,99 +63,82 @@ fn primary_ipv4() -> Option<Ipv4Addr> {
     }
 }
 
-/// All addresses we announce ourselves to.
-fn broadcast_targets() -> Vec<Ipv4Addr> {
-    let mut targets = vec![
-        Ipv4Addr::BROADCAST, // 255.255.255.255
-        Ipv4Addr::LOCALHOST, // same-machine instances
+/// mDNS advertiser: registers our service so other PCs can resolve our ID.
+/// Returns a handle that can be dropped to stop advertising.
+pub fn start_advertiser(
+    node_id: &str,
+    name: &str,
+    http_port: u16,
+) -> Option<ServiceDaemon> {
+    let daemon = ServiceDaemon::new().ok()?;
+    let ip = primary_ipv4()?;
+    let instance_name = format!("doclink-{}.{}", node_id, MDNS_SERVICE_TYPE);
+    let props = vec![
+        ("node_id".to_string(), node_id.to_string()),
+        ("http_port".to_string(), http_port.to_string()),
     ];
-    if let Some(ip) = primary_ipv4() {
-        // Assume a /24 — the overwhelmingly common office LAN. The
-        // directed broadcast is routed via the interface that owns the
-        // subnet, sidestepping the wrong-adapter problem entirely.
-        let directed = Ipv4Addr::from(u32::from(ip) | 0x0000_00FF);
-        if !targets.contains(&directed) {
-            targets.push(directed);
-        }
+    let service = ServiceInfo::new(
+        MDNS_SERVICE_TYPE,
+        &instance_name,
+        name,
+        ip.to_string(),
+        http_port,
+        Some(props),
+    )
+    .ok()?;
+    if daemon.register(service).is_err() {
+        return None;
     }
-    targets
+    Some(daemon)
 }
 
-/// Broadcast our beacon until shutdown. Best-effort: send failures are
-/// ignored (adapters come and go).
-pub async fn run_broadcast(beacon: Beacon, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-    let Ok(bytes) = serde_json::to_vec(&beacon) else {
-        return;
-    };
-    let sock = match std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    if sock.set_broadcast(true).is_err() {
-        return;
-    }
-    let mut interval = tokio::time::interval(Duration::from_secs(BEACON_INTERVAL_SECS));
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                for target in broadcast_targets() {
-                    let _ = sock.send_to(&bytes, SocketAddr::from((target, DISCOVERY_PORT)));
-                }
-            }
-            _ = shutdown.changed() => break,
-        }
-    }
-}
-
-/// Listen for beacons until shutdown, updating the registry.
-pub async fn run_listener(
+/// mDNS browser: watches for _doclink._tcp.local services and updates the
+/// registry with any peers we see. Runs until shutdown.
+pub async fn run_browser(
     registry: PeerRegistry,
     self_node_id: String,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    // socket2 lets us set SO_REUSEADDR/SO_REUSEPORT before bind so
-    // multiple nodes on one machine can share the discovery port.
-    let sock = match socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None) {
-        Ok(s) => s,
-        Err(_) => return,
+    let Ok(daemon) = ServiceDaemon::new() else {
+        return;
     };
-    let _ = sock.set_reuse_address(true);
-    #[cfg(unix)]
-    let _ = sock.set_reuse_port(true);
-    if sock
-        .bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)).into())
-        .is_err()
-    {
+    let Ok(rx) = daemon.browse(MDNS_SERVICE_TYPE) else {
         return;
-    }
-    let std_sock: std::net::UdpSocket = sock.into();
-    if std_sock.set_nonblocking(true).is_err() {
-        return;
-    }
-    let udp = match tokio::net::UdpSocket::from_std(std_sock) {
-        Ok(u) => u,
-        Err(_) => return,
     };
 
-    let mut buf = vec![0u8; 2048];
     loop {
         tokio::select! {
-            recv = udp.recv_from(&mut buf) => {
-                let Ok((n, src)) = recv else { continue };
-                let Ok(beacon) = serde_json::from_slice::<Beacon>(&buf[..n]) else { continue };
-                if !beacon.is_valid() || beacon.node_id == self_node_id {
-                    continue;
-                }
-                registry.upsert(Peer {
-                    node_id: beacon.node_id,
-                    name: beacon.name,
-                    addr: src.ip().to_string(),
-                    http_port: beacon.http_port,
-                    fingerprint: beacon.fingerprint,
-                    last_seen_unix: unix_now(),
-                });
-            }
             _ = shutdown.changed() => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                while let Ok(event) = rx.try_recv() {
+                    use mdns::ServiceEvent::*;
+                    match event {
+                        ServiceFound(info) | ServiceResolved(info) => {
+                            let Some(props) = info.get_properties() else { continue };
+                            let Some(node_id) = props.get("node_id").map(|s| s.to_string()) else { continue };
+                            if node_id == self_node_id {
+                                continue;
+                            }
+                            let http_port = props
+                                .get("http_port")
+                                .and_then(|s| s.parse::<u16>().ok())
+                                .unwrap_or(DISCOVERY_PORT + 1);
+                            let addr = info.get_addresses().iter().next().map(|a| a.to_string());
+                            if let Some(addr) = addr {
+                                registry.upsert(Peer {
+                                    node_id,
+                                    name: info.get_fullname().to_string(),
+                                    addr,
+                                    http_port,
+                                    fingerprint: String::new(),
+                                    last_seen_unix: unix_now(),
+                                });
+                            }
+                        }
+                        ServiceRemoved(_) => {}
+                    }
+                }
+            }
         }
     }
 }

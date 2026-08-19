@@ -1,73 +1,62 @@
-//! Node configuration: an optional TOML file next to the binary.
+//! Config: doclink.toml on the same directory as the executable.
+//!
+//! ```toml
+//! node_name = "PC-Direction"
+//! http_port = 37655
+//! share_root = "shared"
+//! advertise = true  # mDNS advertising; set false to hide this PC from discovery
+//! ```
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
-    /// Display name shown to other nodes (default: machine hostname).
-    pub node_name: Option<String>,
-    /// Folder this PC publishes to the network (read-only).
-    pub share_root: PathBuf,
-    /// HTTP port for the peer-facing data plane (admin plane = port + 1).
+    pub node_name: String,
     pub http_port: u16,
-    /// Path of the ed25519 identity key file.
-    pub identity_key: PathBuf,
-    /// Path of the grants store (who may read my share).
-    pub grants_file: PathBuf,
-    /// Path of the contacts store (PCs I have added).
-    pub contacts_file: PathBuf,
+    pub share_root: String,
+    #[serde(default = "default_true")]
+    pub advertise: bool,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            node_name: None,
-            share_root: PathBuf::from("./shared"),
-            http_port: doclink_core::protocol::DEFAULT_HTTP_PORT,
-            identity_key: PathBuf::from("./doclink-identity.key"),
-            grants_file: PathBuf::from("./doclink-grants.json"),
-            contacts_file: PathBuf::from("./doclink-contacts.json"),
-        }
-    }
+fn default_true() -> bool {
+    true
 }
 
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let path = path
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("doclink.toml"));
-        if !path.exists() {
-            return Ok(Config::default());
-        }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let path = path.unwrap_or_else(|| Path::new("doclink.toml"));
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading config {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
     }
 
     pub fn node_name(&self) -> String {
-        self.node_name.clone().unwrap_or_else(|| {
-            std::env::var("COMPUTERNAME")
-                .or_else(|_| std::env::var("HOSTNAME"))
-                .unwrap_or_else(|_| "doclink-node".into())
-        })
+        self.node_name.clone()
     }
 
     pub fn http_port(&self) -> u16 {
         self.http_port
     }
 
-    pub fn identity_key_path(&self) -> PathBuf {
-        self.identity_key.clone()
+    pub fn advertise(&self) -> bool {
+        self.advertise
+    }
+
+    pub fn share_root(&self) -> PathBuf {
+        PathBuf::from(&self.share_root)
     }
 
     pub fn grants_path(&self) -> PathBuf {
-        self.grants_file.clone()
+        PathBuf::from("doclink-grants.json")
     }
 
     pub fn contacts_path(&self) -> PathBuf {
-        self.contacts_file.clone()
+        PathBuf::from("doclink-contacts.json")
+    }
+
+    pub fn identity_key_path(&self) -> PathBuf {
+        PathBuf::from("doclink-identity.key")
     }
 }

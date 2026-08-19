@@ -41,21 +41,18 @@ presented anywhere MUST hash-match its accompanying public key.
 
 ## 3. Discovery
 
-JSON `Beacon` via UDP to port 37654 every 5 s, TTL 20 s. Because a plain
-broadcast to `255.255.255.255` is unreliable on machines with virtual
-adapters (Windows may route it out a Hyper-V/WSL/VPN NIC), beacons are
-sent to **three** destinations:
+mDNS (Zeroconf) service advertisement and resolution, exactly like
+PrintLink:
 
-1. `255.255.255.255` (limited broadcast)
-2. the **subnet-directed broadcast** of the primary interface, assuming
-   a /24 (e.g. `192.168.1.255`) — routed via the correct adapter
-3. `127.0.0.1` (loopback, so same-machine instances find each other)
+- Service type: `_doclink._tcp.local.`
+- Instance name: `doclink-<node_id>._doclink._tcp.local.`
+- Properties: `node_id` (hex), `http_port` (decimal)
 
-When beacons still can't get through (broadcast filtered by the switch or
-AP), nodes fall back to **active probing**: `GET /v1/info` against every
-address of the primary /24 until the target `node_id` answers. Both
-mechanisms are confined to the local subnet; a contact may carry a manual
-`host:port` fallback for peers on another subnet.
+Clients browse `_doclink._tcp.local.` and resolve a DocLink ID to
+`(ip, port)` from the cache. This is multicast, not broadcast, so it
+survives virtual adapters and mixed networks. A contact may carry a
+manual `host:port` fallback for peers on another subnet or when mDNS
+is blocked.
 
 Discovery is only an **address book** — it resolves a DocLink ID to a
 current IP and shows online/offline. It grants no trust.

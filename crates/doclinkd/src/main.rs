@@ -58,18 +58,26 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let http_port = cfg.http_port();
-    let beacon = Beacon::new(
-        node.node_id.clone(),
-        node.name.clone(),
-        http_port,
-        node.fingerprint.clone(),
-    );
-    tokio::spawn(discovery::run_broadcast(beacon, shutdown_rx.clone()));
-    tokio::spawn(discovery::run_listener(
+
+    // mDNS advertiser: register our service so other PCs can resolve our ID.
+    if cfg.advertise() {
+        let _advertiser = doclink_core::discovery::start_advertiser(
+            &node.node_id,
+            &node.name,
+            http_port,
+        );
+        info!("advertising on mDNS as _doclink._tcp.local");
+    } else {
+        info!("mDNS advertising disabled — this PC is hidden from discovery");
+    }
+
+    // mDNS browser: watch for other PCs and populate the registry.
+    tokio::spawn(doclink_core::discovery::run_browser(
         registry.clone(),
         node.node_id.clone(),
         shutdown_rx.clone(),
     ));
+
     tokio::spawn(store::run_expiry_sweeper(grants.clone(), shutdown_rx));
 
     // Data plane: LAN-facing, signature-authenticated, read-only, scope-filtered.

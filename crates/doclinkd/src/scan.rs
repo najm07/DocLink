@@ -1,11 +1,7 @@
-//! Active subnet probing — the fallback when UDP beacons can't reach a
-//! peer (broadcast filtered by the switch/AP, beacon routed out a virtual
-//! NIC, odd netmasks). Probes http://<ip>:37655/v1/info across the local
-//! /24 concurrently until the target node_id answers — the same trick
-//! that made PrintLink's discovery feel instant.
-//!
-//! Limitation: like broadcast, a /24 probe can't cross subnets. Peers on
-//! another subnet still need the manual host:port fallback.
+//! Active subnet probing — fallback when mDNS can't resolve a peer (rare
+//! on Windows, but useful on networks that block multicast). Probes
+//! http://<ip>:37655/v1/info across the local /24 until the target
+//! node_id answers.
 
 use doclink_core::protocol::{NodeInfo, DEFAULT_HTTP_PORT};
 use std::net::{IpAddr, Ipv4Addr};
