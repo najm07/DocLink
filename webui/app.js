@@ -397,6 +397,43 @@ async function openAccessEditor(g) {
 
 // ---- add contact ----
 
+let discovered = [];
+
+async function loadPeers() {
+  try {
+    discovered = await api("/v1/admin/peers");
+  } catch (_) {
+    discovered = [];
+  }
+  const box = document.getElementById("add-discovered");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!discovered.length) {
+    const hint = document.createElement("p");
+    hint.className = "hint-row";
+    hint.textContent =
+      "Nothing discovered on the LAN. Both PCs must run DocLink and allow it through Windows Firewall (mDNS UDP 5353).";
+    box.appendChild(hint);
+    return;
+  }
+  box.appendChild(Object.assign(document.createElement("p"), {
+    className: "dim",
+    textContent: "Discovered on the LAN — click to fill:",
+  }));
+  for (const p of discovered) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "disc-row";
+    row.textContent = groupId(p.node_id) + "  ·  " + p.addr + ":" + p.http_port;
+    row.onclick = () => {
+      document.getElementById("add-id").value = p.node_id;
+      document.getElementById("add-status").textContent =
+        "ID filled — click Add to pair with this PC.";
+    };
+    box.appendChild(row);
+  }
+}
+
 async function addContact(ev) {
   ev.preventDefault();
   const id = document.getElementById("add-id").value.trim().toLowerCase().replace(/[^0-9a-f]/g, "");
@@ -559,7 +596,10 @@ document.querySelectorAll(".act").forEach((b) => {
 document.getElementById("btn-add").onclick = () => {
   const form = document.getElementById("add-form");
   form.hidden = !form.hidden;
-  if (!form.hidden) document.getElementById("add-id").focus();
+  if (!form.hidden) {
+    document.getElementById("add-id").focus();
+    loadPeers();
+  }
 };
 document.getElementById("add-form").onsubmit = addContact;
 
@@ -584,5 +624,6 @@ setInterval(() => {
   loadContacts();
   loadRequests();
   loadGrants();
+  if (!document.getElementById("add-form").hidden) loadPeers();
 }, 5000);
 loadListing();

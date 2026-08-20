@@ -30,6 +30,64 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ADMIN_ADDR: (&str, u16) = ("127.0.0.1", 37656);
 const ADMIN_URL: &str = "http://127.0.0.1:37656";
 
+/// Windows Firewall rules DocLink needs for LAN discovery to work.
+/// PrintLink's installer opens the same two rules explicitly — Windows
+/// allows the TCP prompt automatically but silently blocks inbound mDNS
+/// (UDP 5353 multicast), which is exactly the "can't find each other by
+/// ID" failure. We add the rules ourselves since DocLink is portable.
+const FW_MDNS_RULE: &str = "DocLink mDNS (UDP 5353)";
+const FW_DATA_RULE: &str = "DocLink data (TCP 37655)";
+
+#[cfg(windows)]
+fn firewall_rule_exists(name: &str) -> bool {
+    Command::new("netsh")
+        .args(["advfirewall", "firewall", "show", "rule"])
+        .args(["name=".to_string() + name])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(name))
+        .unwrap_or(false)
+}
+
+/// Ensure UDP 5353 (mDNS) and TCP 37655 (data plane) are allowed inbound
+/// on private networks. One-time; a single UAC prompt via an elevated
+/// helper. Failure (declined/no admin) is non-fatal — pairing with an
+/// explicit host:port still works.
+#[cfg(windows)]
+fn ensure_firewall() {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    if firewall_rule_exists(FW_MDNS_RULE) && firewall_rule_exists(FW_DATA_RULE) {
+        return;
+    }
+    let script = format!(
+        "netsh advfirewall firewall add rule name=\"{m}\" dir=in action=allow protocol=UDP localport=5353 profile=private\r\n\
+         netsh advfirewall firewall add rule name=\"{d}\" dir=in action=allow protocol=TCP localport=37655 profile=private\r\n\
+         del /q \"%~f0\"",
+        m = FW_MDNS_RULE,
+        d = FW_DATA_RULE
+    );
+    let path = std::env::temp_dir().join("doclink-firewall-rules.cmd");
+    if std::fs::write(&path, script).is_err() {
+        return;
+    }
+    let args: Vec<u16> = format!("/c \"{}\"", path.display()).encode_utf16().collect();
+    let mut args = args;
+    args.push(0);
+    unsafe {
+        ShellExecuteW(
+            HWND(std::ptr::null_mut()),
+            w!("runas"),
+            w!("cmd.exe"),
+            PCWSTR(args.as_ptr()),
+            PCWSTR(std::ptr::null()),
+            SW_HIDE,
+        );
+    }
+}
+
 fn admin_up() -> bool {
     TcpStream::connect(ADMIN_ADDR).is_ok()
 }
@@ -70,10 +128,12 @@ fn ensure_daemon() -> Option<Child> {
     None
 }
 
+/// Returns the tray icon; it must be kept alive for the process lifetime,
+/// otherwise the icon disappears from the system tray immediately.
 #[cfg(windows)]
-fn run_tray(event_loop: &tao::event_loop::EventLoop<String>, proxy: tao::event_loop::EventLoopProxy<String>) {
+fn run_tray(proxy: tao::event_loop::EventLoopProxy<String>) -> Option<tray_icon::TrayIcon> {
     use tray_icon::{
-        menu::{Menu, MenuItem},
+        menu::{Menu, MenuEvent, MenuItem},
         TrayIconBuilder,
     };
     let icon = load_icon();
@@ -82,42 +142,129 @@ fn run_tray(event_loop: &tao::event_loop::EventLoop<String>, proxy: tao::event_l
     let quit = MenuItem::new("Quit", true, None);
     menu.append(&open).unwrap();
     menu.append(&quit).unwrap();
-    let _tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .with_icon(icon)
         .with_tooltip("DocLink")
         .with_menu_on_left_click(false)
         .with_menu(Box::new(menu))
         .build()
-        .unwrap();
-    let open_proxy = proxy.clone();
-    let quit_proxy = proxy.clone();
-    open.register_action(move |_| {
-        let _ = open_proxy.send_event("open".to_string());
+        .ok()?;
+    // tray-icon 0.15 / muda: menu clicks arrive on a global event channel
+    // instead of per-item callbacks. Route them to the window event loop.
+    let open_id = open.id().clone();
+    let quit_id = quit.id().clone();
+    let menu_proxy = proxy.clone();
+    std::thread::spawn(move || {
+        while let Ok(event) = MenuEvent::receiver().recv() {
+            if event.id() == &open_id {
+                let _ = menu_proxy.send_event("open".to_string());
+            } else if event.id() == &quit_id {
+                let _ = menu_proxy.send_event("quit".to_string());
+            }
+        }
     });
-    quit.register_action(move |_| {
-        let _ = quit_proxy.send_event("quit".to_string());
-    });
+    Some(tray)
 }
 
 #[cfg(windows)]
 fn load_icon() -> tray_icon::Icon {
-    // Simple blue square icon (32x32).
-    let (width, height) = (32, 32);
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for _ in 0..(width * height) {
-        rgba.extend_from_slice(&[0x00, 0x78, 0xd4, 0xFF]);
+    // "DL" monogram in a 5x7 pixel font on a rounded blue square, rendered
+    // with 4x supersampling for anti-aliased edges.
+    const SIZE: u32 = 32;
+    const SS: u32 = 4;
+    const SCALE: u32 = 3;
+    const GLYPH_H: u32 = 7;
+    const D: [u8; 7] = [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110];
+    const L: [u8; 7] = [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111];
+
+    let glyphs = [D, L];
+    let mono_w = (5 * 2 * SCALE + 1) as f32; // 31
+    let mono_h = (GLYPH_H * SCALE) as f32; // 21
+    let ox = (SIZE as f32 - mono_w) / 2.0;
+    let oy = (SIZE as f32 - mono_h) / 2.0;
+
+    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let mut acc = [0i32; 4];
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let px = x as f32 + (sx as f32 + 0.5) / SS as f32;
+                    let py = y as f32 + (sy as f32 + 0.5) / SS as f32;
+                    let c = sample_icon(px, py, &glyphs, ox, oy);
+                    for i in 0..4 {
+                        acc[i] += c[i] as i32;
+                    }
+                }
+            }
+            let n = (SS * SS) as i32;
+            let idx = ((y * SIZE + x) * 4) as usize;
+            for i in 0..4 {
+                rgba[idx + i] = (acc[i] / n) as u8;
+            }
+        }
     }
-    tray_icon::Icon::from_rgba(rgba, width, height).unwrap()
+    tray_icon::Icon::from_rgba(rgba, SIZE, SIZE).unwrap()
+}
+
+#[cfg(windows)]
+fn sample_icon(px: f32, py: f32, glyphs: &[[u8; 7]; 2], ox: f32, oy: f32) -> [u8; 4] {
+    const BG: [u8; 4] = [0x00, 0x78, 0xd4, 0xFF];
+    const FG: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+    let in_bg = rounded_rect(px - 16.0, py - 16.0, 15.0, 6.0);
+
+    let rx = px - ox;
+    let ry = py - oy;
+    let cx = (rx / 3.0).floor() as i32;
+    let cy = (ry / 3.0).floor() as i32;
+    let mut on = false;
+    if (0..7).contains(&cy) {
+        let (gi, lc) = if (0..=4).contains(&cx) {
+            (0, cx)
+        } else if (6..=10).contains(&cx) {
+            (1, cx - 6)
+        } else {
+            (-1, 0)
+        };
+        if gi >= 0 {
+            on = (glyphs[gi as usize][cy as usize] >> (4 - lc)) & 1 == 1;
+        }
+    }
+    if on {
+        FG
+    } else if in_bg {
+        BG
+    } else {
+        [0, 0, 0, 0]
+    }
+}
+
+#[cfg(windows)]
+fn rounded_rect(ax: f32, ay: f32, half: f32, corner: f32) -> bool {
+    let dx = ax.abs() - (half - corner);
+    let dy = ay.abs() - (half - corner);
+    if dx > 0.0 && dy > 0.0 {
+        dx * dx + dy * dy <= corner * corner
+    } else if dx > 0.0 {
+        dx <= corner
+    } else if dy > 0.0 {
+        dy <= corner
+    } else {
+        true
+    }
 }
 
 fn main() -> wry::Result<()> {
-    let _child = ensure_daemon();
+    #[cfg(windows)]
+    ensure_firewall();
+
+    let mut child = ensure_daemon();
 
     let event_loop = EventLoopBuilder::<String>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
     #[cfg(windows)]
-    run_tray(&event_loop, proxy.clone());
+    let _tray = run_tray(proxy.clone());
 
     let window = WindowBuilder::new()
         .with_title("DocLink")
@@ -160,6 +307,13 @@ fn main() -> wry::Result<()> {
                     visible_clone.store(true, Ordering::SeqCst);
                 }
                 "quit" => {
+                    // Exit the app and stop the daemon we spawned (a daemon
+                    // we did not start — e.g. owned by another window — is
+                    // left alone).
+                    if let Some(d) = child.as_mut() {
+                        let _ = d.kill();
+                        let _ = d.wait();
+                    }
                     *control_flow = ControlFlow::Exit;
                 }
                 _ => {}

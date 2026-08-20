@@ -1,4 +1,6 @@
-//! Config: doclink.toml on the same directory as the executable.
+//! Config: optional doclink.toml on the same directory as the executable.
+//! If the file is missing, sensible defaults apply so the portable package
+//! works out of the box (node name from the OS hostname).
 //!
 //! ```toml
 //! node_name = "PC-Direction"
@@ -13,23 +15,55 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    #[serde(default = "default_node_name")]
     pub node_name: String,
+    #[serde(default = "default_http_port")]
     pub http_port: u16,
+    #[serde(default = "default_share_root")]
     pub share_root: String,
     #[serde(default = "default_true")]
     pub advertise: bool,
+}
+
+fn default_node_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "DocLink PC".into())
+}
+
+fn default_http_port() -> u16 {
+    37655
+}
+
+fn default_share_root() -> String {
+    "shared".into()
 }
 
 fn default_true() -> bool {
     true
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            node_name: default_node_name(),
+            http_port: default_http_port(),
+            share_root: default_share_root(),
+            advertise: default_true(),
+        }
+    }
+}
+
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let path = path.unwrap_or_else(|| Path::new("doclink.toml"));
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading config {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e).with_context(|| format!("reading config {}", path.display())),
+        }
     }
 
     pub fn node_name(&self) -> String {
@@ -44,9 +78,9 @@ impl Config {
         self.advertise
     }
 
-    pub fn share_root(&self) -> PathBuf {
+    /*pub fn share_root(&self) -> PathBuf {
         PathBuf::from(&self.share_root)
-    }
+    }*/
 
     pub fn grants_path(&self) -> PathBuf {
         PathBuf::from("doclink-grants.json")

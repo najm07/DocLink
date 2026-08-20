@@ -4,7 +4,6 @@
 //! operations are unreachable from the network.
 
 use crate::proxy::{self, ProxyError};
-use crate::scan;
 use crate::server::{self, PairingState};
 use crate::share::{ShareError, ShareRoot};
 use crate::store::{Contact, ContactsFile, Grant, GrantsFile, SharedStore};
@@ -65,6 +64,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/admin/info", get(info))
+        .route("/v1/admin/peers", get(list_peers))
         .route("/v1/admin/contacts", get(list_contacts).post(add_contact))
         .route("/v1/admin/contacts/{node_id}", delete(remove_contact))
         .route("/v1/admin/contacts/{node_id}/status", get(contact_status))
@@ -160,6 +160,13 @@ async fn info(State(s): State<AppState>) -> Json<NodeInfo> {
 
 // ---- Contacts ----
 
+/// Everything the mDNS browser currently sees on the LAN. Lets the UI
+/// show live discovery results and doubles as a diagnostic for firewall
+/// / multicast issues ("no peers" usually means UDP 5353 is blocked).
+async fn list_peers(State(s): State<AppState>) -> Json<Vec<doclink_core::protocol::Peer>> {
+    Json(s.inner.peers.snapshot())
+}
+
 async fn list_contacts(State(s): State<AppState>) -> Json<Vec<ContactInfo>> {
     let peers = s.inner.peers.snapshot();
     let contacts = s.inner.contacts.lock().unwrap().read().clone();
@@ -185,8 +192,9 @@ struct AddContactBody {
 }
 
 /// How long to wait for mDNS resolution before falling back to active
-/// subnet probing.
-const DISCOVERY_WAIT: Duration = Duration::from_secs(3);
+/// subnet probing. Generous: multicast + probing + the browser's own
+/// resolve round-trip can take a few seconds on real networks.
+const DISCOVERY_WAIT: Duration = Duration::from_secs(6);
 
 /// Add a PC by DocLink ID: resolve via mDNS (instant on most networks),
 /// then fall back to active /24 probing if needed, verify identity,
@@ -410,32 +418,35 @@ async fn push_decision_to_requester(
     requester_node_id: &str,
     body: &DecisionBody,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    // Find the requester via mDNS registry first.
+    // Find the requester via mDNS registry first. The contacts lock guard
+    // must be dropped before the await below (the future must stay Send).
     let base = {
         let peers = s.inner.peers.snapshot();
         if let Some(p) = peers.iter().find(|p| p.node_id == requester_node_id) {
             format!("http://{}:{}", p.addr, p.http_port)
-        } else if let Some(h) = s
-            .inner
-            .contacts
-            .lock()
-            .unwrap()
-            .read()
-            .contacts
-            .iter()
-            .find(|c| c.node_id == requester_node_id)
-            .and_then(|c| c.host.clone())
-        {
-            format!("http://{h}")
         } else {
-            // Fallback: active probe (same as Add PC).
-            if let Some(b) = crate::scan::find_node(requester_node_id).await {
-                b
+            let host = s
+                .inner
+                .contacts
+                .lock()
+                .unwrap()
+                .read()
+                .contacts
+                .iter()
+                .find(|c| c.node_id == requester_node_id)
+                .and_then(|c| c.host.clone());
+            if let Some(h) = host {
+                format!("http://{h}")
             } else {
-                return Err(err(
-                    StatusCode::NOT_FOUND,
-                    "requester not found on the LAN — decision will apply locally",
-                ));
+                // Fallback: active probe (same as Add PC).
+                if let Some(b) = crate::scan::find_node(requester_node_id).await {
+                    b
+                } else {
+                    return Err(err(
+                        StatusCode::NOT_FOUND,
+                        "requester not found on the LAN — decision will apply locally",
+                    ));
+                }
             }
         }
     };

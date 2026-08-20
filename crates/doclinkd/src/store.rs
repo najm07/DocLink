@@ -159,3 +159,62 @@ pub async fn run_expiry_sweeper(
         }
     }
 }
+
+/// Re-check pending contacts against the grantor's `/v1/pair/status`.
+/// The grantor pushes the decision, but if that push is lost (requester
+/// offline at approval time, or mDNS miss), this polling catches up and
+/// flips the contact to "approved"/"denied".
+pub async fn run_pair_verifier(
+    contacts: SharedStore<ContactsFile>,
+    peers: doclink_core::discovery::PeerRegistry,
+    my_id: String,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    use doclink_core::protocol::{PairStatus, PairStatusResponse};
+
+    let client = reqwest::Client::new();
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let pending: Vec<String> = contacts.lock().unwrap().read().contacts
+                    .iter()
+                    .filter(|c| c.status == "pending")
+                    .map(|c| c.node_id.clone())
+                    .collect();
+                for node_id in pending {
+                    let Some(p) = peers.snapshot().into_iter().find(|p| p.node_id == node_id) else {
+                        continue;
+                    };
+                    let url = format!(
+                        "http://{}:{}/v1/pair/status?node_id={}",
+                        p.addr, p.http_port, my_id
+                    );
+                    let Ok(resp) = client.get(&url).timeout(Duration::from_secs(2)).send().await else {
+                        continue;
+                    };
+                    let Ok(status) = resp.json::<PairStatusResponse>().await else {
+                        continue;
+                    };
+                    let label = match status.status {
+                        PairStatus::Approved => Some("approved"),
+                        PairStatus::Denied => Some("denied"),
+                        _ => None,
+                    };
+                    let Some(label) = label else { continue };
+                    let mut c = contacts.lock().unwrap();
+                    let Some(contact) = c.data_mut().contacts.iter_mut().find(|c| c.node_id == node_id) else {
+                        continue;
+                    };
+                    if contact.status != label {
+                        contact.status = label.to_string();
+                        if let Err(e) = c.save() {
+                            tracing::warn!(%e, "failed to persist contact status from verifier");
+                        }
+                    }
+                }
+            }
+            _ = shutdown.changed() => break,
+        }
+    }
+}

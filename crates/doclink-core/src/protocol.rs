@@ -8,7 +8,12 @@ pub const DISCOVERY_PORT: u16 = 37654;
 pub const DEFAULT_HTTP_PORT: u16 = 37655;
 pub const BEACON_MAGIC: &str = "DOCLINK_BEACON";
 pub const BEACON_INTERVAL_SECS: u64 = 5;
-pub const PEER_TTL_SECS: u64 = 20;
+/// How long a peer stays in the registry without a fresh mDNS event.
+/// Generous on purpose: mdns-sd re-announcements land every ~60 s (the
+/// A-record refresh cadence), so a short TTL makes live peers disappear
+/// between announcements. "Online" is cosmetic — real access is enforced
+/// by signed grants, and stale entries fail cleanly at connect time.
+pub const PEER_TTL_SECS: u64 = 300;
 
 /// UDP broadcast announcement sent every BEACON_INTERVAL_SECS.
 /// Discovery is only an address book (node_id -> current IP);

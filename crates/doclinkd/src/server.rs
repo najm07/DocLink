@@ -5,7 +5,7 @@
 use crate::auth;
 use crate::config::Config;
 use crate::share::{ShareError, ShareRoot};
-use crate::store::{Grant, GrantsFile, SharedStore};
+use crate::store::{ContactsFile, Grant, GrantsFile, SharedStore};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -38,6 +38,7 @@ pub(crate) struct Inner {
     pub node: NodeInfo,
     pub share: ShareRoot,
     pub grants: SharedStore<GrantsFile>,
+    pub contacts: SharedStore<ContactsFile>,
     pub pairing: PairingState,
 }
 
@@ -46,6 +47,7 @@ impl AppState {
         cfg: &Config,
         node: NodeInfo,
         grants: SharedStore<GrantsFile>,
+        contacts: SharedStore<ContactsFile>,
         pairing: PairingState,
     ) -> Self {
         let share = ShareRoot::new(cfg.share_root.clone()).expect("share root must be creatable");
@@ -54,6 +56,7 @@ impl AppState {
                 node,
                 share,
                 grants,
+                contacts,
                 pairing,
             }),
         }
@@ -136,20 +139,23 @@ async fn list(
     State(s): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<PathQuery>,
-) -> Result<Json<ListResponse>, StatusCode> {
+) -> Result<Json<ListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let path_q = format!("/v1/list?path={}", urlencoding::encode(&q.path));
-    let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)?;
+    let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)
+        .map_err(|(code, msg)| err(code, msg))?;
     if !can_list(&grant.paths, &q.path) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(err(StatusCode::FORBIDDEN, "path outside grant scope"));
     }
     let mut entries = s
         .inner
         .share
         .list(&q.path)
         .map_err(|e| match e {
-            ShareError::NotFound(_) => StatusCode::NOT_FOUND,
-            ShareError::OutsideRoot | ShareError::IsRoot => StatusCode::FORBIDDEN,
-            ShareError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ShareError::NotFound(_) => err(StatusCode::NOT_FOUND, "path not found"),
+            ShareError::OutsideRoot | ShareError::IsRoot => {
+                err(StatusCode::FORBIDDEN, "path outside share root")
+            }
+            ShareError::Io(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "share read error"),
         })?;
     if !grant.paths.is_empty() {
         entries.retain(|e| entry_visible(&grant.paths, &e.path, e.kind));
@@ -164,22 +170,25 @@ async fn file(
     State(s): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<PathQuery>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let path_q = format!("/v1/file?path={}", urlencoding::encode(&q.path));
-    let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)?;
+    let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)
+        .map_err(|(code, msg)| err(code, msg))?;
     if !can_read_file(&grant.paths, &q.path) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(err(StatusCode::FORBIDDEN, "path outside grant scope"));
     }
     let path = s.inner.share.resolve(&q.path).map_err(|e| match e {
-        ShareError::NotFound(_) => StatusCode::NOT_FOUND,
-        ShareError::OutsideRoot | ShareError::IsRoot => StatusCode::FORBIDDEN,
-        ShareError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        ShareError::NotFound(_) => err(StatusCode::NOT_FOUND, "path not found"),
+        ShareError::OutsideRoot | ShareError::IsRoot => {
+            err(StatusCode::FORBIDDEN, "path outside share root")
+        }
+        ShareError::Io(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "share read error"),
     })?;
     // TODO(M3): stream with tokio::fs::File + Range header support
     // instead of buffering the whole file in memory.
     let bytes = tokio::fs::read(&path)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "share read error"))?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -254,6 +263,11 @@ async fn pair_request(
 
 /// Grantor -> requester notification. Lets the requester learn the outcome
 /// even though it cannot reach the grantor's admin plane (localhost-only).
+///
+/// This runs on the REQUESTER's machine: the grantor already applied the
+/// decision (created its grant), so we must not create a grant here — we
+/// record the outcome for `/v1/pair/status` and update our contact row so
+/// the UI stops showing "pending".
 async fn pair_decision(
     State(s): State<AppState>,
     body: String,
@@ -266,20 +280,44 @@ async fn pair_decision(
         &d.signature,
     )
     .map_err(|_| err(StatusCode::FORBIDDEN, "bad signature"))?;
-    let resp = apply_decision(
-        &s.inner.pairing,
-        &s.inner.grants,
-        &d.requester_node_id,
-        &d.decision,
-        d.duration_secs,
-    )
-    .map_err(|e| err(StatusCode::NOT_FOUND, e))?;
+    let status = match d.decision.as_str() {
+        "approve" => PairStatus::Approved,
+        "deny" => PairStatus::Denied,
+        _ => PairStatus::Unknown,
+    };
+    let resp = PairStatusResponse {
+        status,
+        expires_unix: (d.duration_secs != 0).then(|| unix_now() + d.duration_secs),
+    };
     s.inner
         .pairing
         .decisions
         .lock()
         .unwrap()
         .insert(d.requester_node_id.clone(), resp);
+    // Bind the grantor to the fingerprint we recorded at add time.
+    if let Ok(fp) = NodeIdentity::fingerprint_from_pubkey_hex(&d.pubkey_hex) {
+        let label = match status {
+            PairStatus::Approved => "approved",
+            PairStatus::Denied => "denied",
+            _ => "pending",
+        };
+        let mut c = s.inner.contacts.lock().unwrap();
+        let Some(contact) = c
+            .data_mut()
+            .contacts
+            .iter_mut()
+            .find(|c| c.fingerprint == fp)
+        else {
+            return Ok(StatusCode::NO_CONTENT);
+        };
+        if contact.status != label {
+            contact.status = label.to_string();
+            if let Err(e) = c.save() {
+                tracing::warn!(%e, "failed to persist contact status after decision");
+            }
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -344,6 +382,25 @@ async fn pair_status(
     }
     if let Some(d) = s.inner.pairing.decisions.lock().unwrap().get(&q.node_id) {
         return Json(d.clone());
+    }
+    // A live grant for this node means the pair went through — the
+    // requester's poller uses this to catch up when the decision push
+    // was lost (peer offline at approval time).
+    let now = unix_now();
+    if let Some(g) = s
+        .inner
+        .grants
+        .lock()
+        .unwrap()
+        .read()
+        .grants
+        .iter()
+        .find(|g| g.node_id == q.node_id && g.expires_unix.map_or(true, |e| e > now))
+    {
+        return Json(PairStatusResponse {
+            status: PairStatus::Approved,
+            expires_unix: g.expires_unix,
+        });
     }
     Json(PairStatusResponse {
         status: PairStatus::Unknown,

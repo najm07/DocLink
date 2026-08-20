@@ -51,6 +51,17 @@ impl PeerRegistry {
             .unwrap()
             .insert(peer.node_id.clone(), peer);
     }
+
+    /// Refresh the liveness timestamp of a known peer. mdns-sd does not
+    /// re-fire ServiceResolved for identical re-announcements (dns_cache
+    /// `add_or_update` only marks *changed* records as updates), so events
+    /// alone would let a live peer age out of the registry. The daemon's
+    /// keepalive task calls this after a successful TCP probe.
+    pub fn touch(&self, node_id: &str) {
+        if let Some(peer) = self.peers.lock().unwrap().get_mut(node_id) {
+            peer.last_seen_unix = unix_now();
+        }
+    }
 }
 
 /// Primary interface IPv4, derived from the routing table.
@@ -72,14 +83,21 @@ pub fn start_advertiser(
 ) -> Option<ServiceDaemon> {
     let daemon = ServiceDaemon::new().ok()?;
     let ip = primary_ipv4()?;
-    let instance_name = format!("doclink-{}.{}", node_id, MDNS_SERVICE_TYPE);
+    let instance_name = format!("doclink-{}", node_id);
+    let host_name = format!(
+        "{}.local.",
+        name.to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+            .collect::<String>()
+    );
     let mut props = HashMap::new();
     props.insert("node_id".to_string(), node_id.to_string());
     props.insert("http_port".to_string(), http_port.to_string());
     let service = ServiceInfo::new(
         MDNS_SERVICE_TYPE,
         &instance_name,
-        name,
+        &host_name,
         ip.to_string(),
         http_port,
         props,
@@ -115,14 +133,19 @@ pub async fn run_browser(
                         ServiceFound(_, _) | ServiceRemoved(_, _) => {}
                         ServiceResolved(info) => {
                             let props = info.get_properties();
-                            let Some(node_id) = props.get("node_id").map(|s| s.to_string()) else { continue };
+                            let Some(node_id) = props
+                                .get_property_val_str("node_id")
+                                .map(|s| s.to_string())
+                            else {
+                                continue
+                            };
                             if node_id == self_node_id {
                                 continue;
                             }
                             let http_port = props
                                 .get("http_port")
-                                .and_then(|p| p.val_str().map(|s| s.parse::<u16>().ok()).flatten())
-                                .unwrap_or(37656);
+                                .and_then(|p| p.val_str().parse::<u16>().ok())
+                                .unwrap_or(37655);
                             let addr = info.get_addresses().iter().next().map(|a| a.to_string());
                             if let Some(addr) = addr {
                                 registry.upsert(Peer {
@@ -140,5 +163,44 @@ pub async fn run_browser(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn mDNS_roundtrip_registers_peer_by_id() {
+        let registry = PeerRegistry::new();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let my_id = "aaaaaaaaaaaaaaaa".to_string();
+        let peer_id = "0123456789abcdef".to_string();
+
+        let advertiser = start_advertiser(&peer_id, "test-pc", 37655).expect("advertiser");
+        let browser = tokio::spawn(run_browser(registry.clone(), my_id, shutdown_rx));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut peer = None;
+        while std::time::Instant::now() < deadline {
+            peer = registry
+                .snapshot()
+                .into_iter()
+                .find(|p| p.node_id == peer_id);
+            if peer.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        drop(advertiser);
+        shutdown_tx.send(true).ok();
+        let _ = browser.await;
+
+        let peer = peer.expect("peer should be discovered by node_id");
+        assert_eq!(peer.node_id, peer_id);
+        assert_eq!(peer.http_port, 37655);
+        assert!(!peer.addr.is_empty());
     }
 }
