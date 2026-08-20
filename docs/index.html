@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="DocLink — peer-to-peer LAN file sharing for Windows. Add a PC by its DocLink ID, approve once, browse and download. No cloud, no central server." />
+  <title>DocLink — LAN file sharing for Windows</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">DL</span>
+        <span class="brand-name">DocLink</span>
+      </div>
+      <h1>Share files between PCs on your LAN.<br />No cloud. No server. No IPs.</h1>
+      <p class="tagline">
+        DocLink discovers the PCs around you and connects them with signed, revocable
+        trust. Add a PC by its <strong>DocLink ID</strong>, the other PC approves once,
+        and you browse their shared folder like a drive — downloads only.
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/najm07/doclink/releases/latest/download/doclink-portable.zip">
+          Download for Windows
+          <span class="btn-sub">portable zip · two exes · no installer</span>
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/najm07/doclink">View on GitHub</a>
+      </div>
+      <p class="hint">Requires the free <a href="https://developer.microsoft.com/en-us/microsoft-edge/webview2/">WebView2 runtime</a> (preinstalled on Windows 11).</p>
+    </div>
+  </header>
+
+  <section class="app-mock" aria-label="DocLink application preview">
+    <div class="mock-win">
+      <div class="mock-titlebar">
+        <span class="mock-mark">DL</span>
+        <span class="mock-name">DocLink</span>
+        <span class="mock-id">ID · f3a8·2c71·90d4·b5e6</span>
+        <span class="mock-controls"><i></i><i></i><i></i></span>
+      </div>
+      <div class="mock-body">
+        <nav class="mock-activity" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="1"/><path d="M8 21h8M12 17v4"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M4 8l8 6 8-6"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 3l8 4v6c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V7z"/></svg>
+        </nav>
+        <aside class="mock-side">
+          <div class="mock-side-head"><h2>PCS</h2><span class="mock-plus">+</span></div>
+          <div class="mock-pc on">
+            <span class="mock-dot"></span>
+            <div><strong>PC-Compta</strong><small>approved · f3a8·2c71·90d4·b5e6</small></div>
+          </div>
+          <div class="mock-pc on">
+            <span class="mock-dot"></span>
+            <div><strong>Office-2F</strong><small>approved · 1c9d·4a02·e7f3·8b21</small></div>
+          </div>
+          <div class="mock-pc">
+            <span class="mock-dot off"></span>
+            <div><strong>PC-Atelier</strong><small>offline · 77bb·0e64·2a9c·d3f8</small></div>
+          </div>
+          <div class="mock-pc">
+            <span class="mock-dot pending"></span>
+            <div><strong>Laptop-Marketing</strong><small>pending approval · 50e1·f9a7·38c2·6d40</small></div>
+          </div>
+        </aside>
+        <main class="mock-main">
+          <div class="mock-crumb">PC-Compta <span>/</span> shared <span>/</span></div>
+          <div class="mock-grid">
+            <div class="mock-item"><svg viewBox="0 0 24 24"><path d="M3 4h7l2 2h9v14H3z"/></svg><span>invoices</span><small>folder</small></div>
+            <div class="mock-item"><svg viewBox="0 0 24 24"><path d="M3 4h7l2 2h9v14H3z"/></svg><span>photos</span><small>folder</small></div>
+            <div class="mock-item file"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/></svg><span>manual.pdf</span><small>1.4 MB</small></div>
+            <div class="mock-item file"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/></svg><span>hello.txt</span><small>14 B</small></div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </section>
+
+  <section class="features">
+    <h2>Built for real offices</h2>
+    <div class="feature-grid">
+      <article>
+        <h3>Zero-config discovery</h3>
+        <p>mDNS finds every DocLink PC on your network automatically. The Add dialog lists live PCs — click one, no IPs to type, no ports to forward.</p>
+      </article>
+      <article>
+        <h3>Trust you control</h3>
+        <p>Every PC has a DocLink ID bound to a cryptographic identity. Pairing is an explicit request the owner approves — and revokes at any time.</p>
+      </article>
+      <article>
+        <h3>Scoped grants</h3>
+        <p>Share the whole folder or just one file with specific PCs. Access is enforced server-side on every request.</p>
+      </article>
+      <article>
+        <h3>Read-only, always</h3>
+        <p>Peers can only browse and download. They can never modify, delete, or upload to your PC. No inbound writes, ever.</p>
+      </article>
+      <article>
+        <h3>Signature-authenticated</h3>
+        <p>Every request is signed (ed25519) and timestamped. The web UI talks only to a localhost admin plane; the LAN sees only the locked-down data plane.</p>
+      </article>
+      <article>
+        <h3>No cloud, no accounts</h3>
+        <p>Your files never leave the LAN. DocLink has no server to join, no telemetry, nothing to configure beyond one firewall prompt.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="steps">
+    <h2>Up and sharing in a minute</h2>
+    <ol>
+      <li><strong>Run it.</strong> Unzip and launch <code>doclink-win.exe</code> on both PCs. Accept the one-time firewall prompt.</li>
+      <li><strong>Add.</strong> On your PC press <strong>+</strong>, pick the other PC from the discovered list (or paste its DocLink ID) and give it a name.</li>
+      <li><strong>Approve.</strong> On the other PC, accept the request — optionally scoped to a single file. Browse and download.</li>
+    </ol>
+  </section>
+
+  <footer>
+    <p><strong>DocLink</strong> — peer-to-peer LAN file sharing · <a href="https://github.com/najm07/doclink">source</a> · <a href="https://github.com/najm07/doclink/blob/main/docs/protocol.md">wire protocol</a></p>
+    <p class="fine">Open source under the MIT license · Rust · Windows</p>
+  </footer>
+
+</body>
+</html>
