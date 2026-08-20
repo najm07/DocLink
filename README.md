@@ -17,6 +17,10 @@ Peer-to-peer LAN file sharing for Windows — read-only shares, no upload, no ce
 4. On another PC, open the DocLink window, press **+**, paste the other PC's DocLink ID, give it an alias, and click **Add**
 5. Browse that PC's share in the main grid; download files with **Download**
 
+> On first run, `doclink-win` prompts once (UAC) to open Windows Firewall for
+> UDP 5353 (mDNS discovery) and the data port (TCP 37655) — required for peers
+> to find and reach each other on the LAN.
+
 ## Protocol
 
 See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.2).
@@ -52,7 +56,7 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.2).
 - [x] Loopback beacons: same-machine instances discover each other
 - [x] `--port` flag for a second same-PC instance
 - [x] Scoped grants: share one file or subfolder with specific PCs only
-- [ ] Two-node verification on the office LAN (firewall rules for 37654/37655)
+- [x] Two-node verification on the office LAN (automatic firewall rules for UDP 5353 + TCP data port)
 
 ### M3 — Actions and polish
 
@@ -66,8 +70,8 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.2).
 - [ ] Print button: download to temp, then Windows shell `print` verb via windows-rs (`ShellExecuteEx`)
 - [ ] Toast notifications (pair request received, grant expiring soon)
 - [ ] Graceful shutdown (Ctrl-C / service stop)
-- [ ] Contact status refresh (re-poll pair/status, surface expiry)
-- [ ] Tray icon so the daemon is visible/manageable without the window
+- [x] Contact status refresh: pending contacts re-poll the grantor's `/v1/pair/status`, and peers stay live via TCP keepalive (mDNS re-announcements alone don't refresh liveness)
+- [x] Tray icon so the daemon is visible/manageable without the window (Open / Quit)
 
 ### M4 — Encryption and packaging
 
@@ -78,10 +82,10 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.2).
 
 ### M5 — Discovery mode (network PC browser)
 
-- [ ] New **Network** view that lists all PCs on the LAN currently running DocLink (from beacons)
-- [ ] One-click **Add** from the discovery list (no need to paste the ID)
+- [x] Add dialog lists PCs currently on the LAN running DocLink — click a row to fill the ID (no pasting)
+- [ ] Standalone **Network** view that lists all live PCs at a glance
 - [ ] Settings toggle **Hide this PC from discovery** (beacon suppression) so a PC can stay invisible while still adding others
-- [ ] Respect the hide setting in `doclink.toml` / UI
+- [x] Respect the hide setting in `doclink.toml` / UI (`advertise = false`)
 
 ### Post-v1 ideas
 
