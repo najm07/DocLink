@@ -29,7 +29,18 @@ impl IntoResponse for ProxyError {
             ),
             ProxyError::Upstream(m) => (StatusCode::BAD_GATEWAY, m),
         };
-        (status, axum::Json(ErrorResponse { error: msg })).into_response()
+        (status, axum::Json(ErrorResponse::new(msg))).into_response()
+    }
+}
+
+/// Surface the upstream error's human message verbatim — the data plane
+/// already phrases pending/denied/expired for end users. Only fall back
+/// to the noisy "peer returned …" wrapper when the body is not one of
+/// ours.
+fn upstream_message(status: StatusCode, body: &str) -> String {
+    match serde_json::from_str::<ErrorResponse>(body) {
+        Ok(e) if !e.error.is_empty() => e.error,
+        _ => format!("peer returned {status}: {body}"),
     }
 }
 
@@ -93,7 +104,7 @@ pub async fn list(
         .await
         .map_err(|e| ProxyError::Upstream(e.to_string()))?;
     if !status.is_success() {
-        return Err(ProxyError::Upstream(format!("peer returned {status}: {body}")));
+        return Err(ProxyError::Upstream(upstream_message(status, &body)));
     }
     serde_json::from_str(&body)
         .map_err(|e| ProxyError::Upstream(format!("invalid peer response: {e}")))
@@ -141,7 +152,7 @@ pub async fn file(
         .and_then(|v| v.parse::<u64>().ok());
     if !status.is_success() {
         let msg = resp.text().await.unwrap_or_default();
-        return Err(ProxyError::Upstream(format!("peer returned {status}: {msg}")));
+        return Err(ProxyError::Upstream(upstream_message(status, &msg)));
     }
     // Stream the body straight through — never buffer a whole file here.
     let name = path.rsplit('/').next().unwrap_or("download");

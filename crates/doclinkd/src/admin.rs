@@ -201,12 +201,7 @@ async fn static_file(uri: axum::http::Uri) -> Response {
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        status,
-        Json(ErrorResponse {
-            error: msg.into(),
-        }),
-    )
+    (status, Json(ErrorResponse::new(msg)))
 }
 
 fn share_err(e: ShareError) -> (StatusCode, Json<ErrorResponse>) {
@@ -601,10 +596,10 @@ async fn decide_request(
     )
     .map_err(|e| err(StatusCode::NOT_FOUND, e))?;
 
-    // Push the decision to the requester so its contact row updates.
-    if body.decision == "approve" {
-        let _ = push_decision_to_requester(&s, &node_id, &body).await;
-    }
+    // Push the decision to the requester so its contact row updates and
+    // its browse attempts say "denied" instead of "unknown". Denials are
+    // pushed too — otherwise the requester never learns the outcome.
+    let _ = push_decision_to_requester(&s, &node_id, &body).await;
 
     Ok(Json(resp))
 }

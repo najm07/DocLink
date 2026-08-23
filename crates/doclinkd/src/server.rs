@@ -179,12 +179,7 @@ fn unix_now() -> u64 {
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        status,
-        Json(ErrorResponse {
-            error: msg.into(),
-        }),
-    )
+    (status, Json(ErrorResponse::new(msg)))
 }
 
 // ---- Grant path scoping ----
@@ -290,7 +285,7 @@ async fn list(
 ) -> Result<Json<ListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let path_q = format!("/v1/list?path={}", urlencoding::encode(&q.path));
     let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)
-        .map_err(|(code, msg)| err(code, msg))?;
+        .map_err(auth::AuthError::into_response)?;
     if !can_list(&grant.paths, &q.path) {
         return Err(err(StatusCode::FORBIDDEN, "path outside grant scope"));
     }
@@ -322,7 +317,7 @@ async fn file(
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let path_q = format!("/v1/file?path={}", urlencoding::encode(&q.path));
     let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)
-        .map_err(|(code, msg)| err(code, msg))?;
+        .map_err(auth::AuthError::into_response)?;
     if !can_read_file(&grant.paths, &q.path) {
         return Err(err(StatusCode::FORBIDDEN, "path outside grant scope"));
     }
@@ -579,6 +574,16 @@ pub fn apply_decision(
         .map(|entry| entry.request)
         .ok_or("no pending request from this node")?;
     if decision != "approve" {
+        // Record the denial so the grantor's own /v1/pair/status answers
+        // "denied" to the requester's catch-up poller, not "unknown".
+        remember_decision(
+            pairing,
+            requester_node_id,
+            PairStatusResponse {
+                status: PairStatus::Denied,
+                expires_unix: None,
+            },
+        );
         return Ok(PairStatusResponse {
             status: PairStatus::Denied,
             expires_unix: None,
@@ -624,8 +629,8 @@ async fn pair_status(
     // of pairing state is no longer possible.
     let path_q = format!("/v1/pair/status?node_id={}", urlencoding::encode(&q.node_id));
     let (caller_node, pk_hex, sig) = auth::verify_signed_headers(&headers, "GET", &path_q, b"")
-        .map_err(|(code, msg)| err(code, msg))?;
-    auth::reject_replays(&s, &sig).map_err(|(code, msg)| err(code, msg))?;
+        .map_err(auth::AuthError::into_response)?;
+    auth::reject_replays(&s, &sig).map_err(auth::AuthError::into_response)?;
     if caller_node != q.node_id {
         return Err(err(
             StatusCode::FORBIDDEN,

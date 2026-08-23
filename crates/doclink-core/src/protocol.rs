@@ -96,9 +96,25 @@ pub struct Peer {
 }
 
 /// Uniform error body for all HTTP endpoints.
+///
+/// `code` carries a stable machine-readable reason so peers can render
+/// their own wording: `"pending" | "denied" | "expired" |
+/// "unknown-node"` on the data plane. Absent for generic errors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+impl ErrorResponse {
+    pub fn new(error: impl Into<String>) -> Self {
+        Self { error: error.into(), code: None }
+    }
+
+    pub fn coded(error: impl Into<String>, code: &str) -> Self {
+        Self { error: error.into(), code: Some(code.to_string()) }
+    }
 }
 
 /// Base URL for a discovered peer address (v0.3: TLS-only data plane).

@@ -138,7 +138,10 @@ requests expire after 10 minutes and the pending queue is capped.
 
 Path rules: no absolute paths, no `..`, no drive prefixes; canonicalized
 paths must stay under the share root (`403`), missing paths `404`.
-Errors carry `{ "error": "<message>" }`.
+Errors carry `{ "error": "<message>" }`; authenticated data-plane
+errors additionally carry a stable `"code"` so peers can localize:
+`pending` (pair request not yet approved) · `denied` · `expired` ·
+`unknown-node` (no pairing exists). Messages are end-user ready.
 
 ### Grant scoping
 
