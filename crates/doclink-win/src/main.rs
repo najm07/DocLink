@@ -28,7 +28,53 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const ADMIN_ADDR: (&str, u16) = ("127.0.0.1", 37656);
-const ADMIN_URL: &str = "http://127.0.0.1:37656";
+const DATA_PORT: u16 = 37655;
+
+/// The daemon writes its actual bound admin port to `doclink-admin.port`
+/// next to the exe (supports `--port` instances); fall back to the
+/// default otherwise.
+fn read_admin_port() -> u16 {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let f = dir.join("doclink-admin.port");
+            if let Ok(text) = std::fs::read_to_string(&f) {
+                if let Ok(port) = text.trim().parse::<u16>() {
+                    return port;
+                }
+            }
+        }
+    }
+    ADMIN_ADDR.1
+}
+
+/// Ask the daemon to stop gracefully (admin endpoint), wait for it to
+/// exit, and only then fall back to a hard kill.
+fn stop_daemon(child: &mut Child, port: u16) {
+    use std::io::{Read, Write};
+    if let Ok(mut stream) = TcpStream::connect((ADMIN_ADDR.0, port)) {
+        let req = format!(
+            "POST /v1/admin/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        if stream.write_all(req.as_bytes()).is_ok() {
+            let mut buf = [0u8; 128];
+            let _ = stream.read(&mut buf); // response / EOF
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if !admin_up(port) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Still up after 5 s: hard kill.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn admin_up(port: u16) -> bool {
+    TcpStream::connect((ADMIN_ADDR.0, port)).is_ok()
+}
 
 /// Windows Firewall rules DocLink needs for LAN discovery to work.
 /// PrintLink's installer opens the same two rules explicitly — Windows
@@ -49,9 +95,11 @@ fn firewall_rule_exists(name: &str) -> bool {
 }
 
 /// Ensure UDP 5353 (mDNS) and TCP 37655 (data plane) are allowed inbound
-/// on private networks. One-time; a single UAC prompt via an elevated
-/// helper. Failure (declined/no admin) is non-fatal — pairing with an
-/// explicit host:port still works.
+/// on private networks. One-time; a single UAC prompt runs one inline
+/// PowerShell command that adds both rules directly — nothing is written
+/// to disk first, so there is no script a local attacker could swap
+/// between launch and elevation. Failure (declined/no admin) is non-fatal
+/// — pairing with an explicit host:port still works.
 #[cfg(windows)]
 fn ensure_firewall() {
     use windows::core::{w, PCWSTR};
@@ -62,25 +110,20 @@ fn ensure_firewall() {
     if firewall_rule_exists(FW_MDNS_RULE) && firewall_rule_exists(FW_DATA_RULE) {
         return;
     }
-    let script = format!(
-        "netsh advfirewall firewall add rule name=\"{m}\" dir=in action=allow protocol=UDP localport=5353 profile=private\r\n\
-         netsh advfirewall firewall add rule name=\"{d}\" dir=in action=allow protocol=TCP localport=37655 profile=private\r\n\
-         del /q \"%~f0\"",
+    let ps = format!(
+        "New-NetFirewallRule -DisplayName '{m}' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 5353 -Profile Private | Out-Null; New-NetFirewallRule -DisplayName '{d}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort {p} -Profile Private | Out-Null",
         m = FW_MDNS_RULE,
-        d = FW_DATA_RULE
+        d = FW_DATA_RULE,
+        p = DATA_PORT
     );
-    let path = std::env::temp_dir().join("doclink-firewall-rules.cmd");
-    if std::fs::write(&path, script).is_err() {
-        return;
-    }
-    let args: Vec<u16> = format!("/c \"{}\"", path.display()).encode_utf16().collect();
-    let mut args = args;
+    let params = format!("-NoProfile -NonInteractive -WindowStyle Hidden -Command \"{ps}\"");
+    let mut args: Vec<u16> = params.encode_utf16().collect();
     args.push(0);
     unsafe {
         ShellExecuteW(
             HWND(std::ptr::null_mut()),
             w!("runas"),
-            w!("cmd.exe"),
+            w!("powershell.exe"),
             PCWSTR(args.as_ptr()),
             PCWSTR(std::ptr::null()),
             SW_HIDE,
@@ -88,12 +131,8 @@ fn ensure_firewall() {
     }
 }
 
-fn admin_up() -> bool {
-    TcpStream::connect(ADMIN_ADDR).is_ok()
-}
-
 fn ensure_daemon() -> Option<Child> {
-    if admin_up() {
+    if admin_up(read_admin_port()) {
         return None; // already running (e.g. from a previous window)
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -116,7 +155,7 @@ fn ensure_daemon() -> Option<Child> {
                     // Wait up to 15 s for the admin plane to become reachable.
                     let deadline = Instant::now() + Duration::from_secs(15);
                     while Instant::now() < deadline {
-                        if admin_up() {
+                        if admin_up(read_admin_port()) {
                             return Some(child);
                         }
                         std::thread::sleep(Duration::from_millis(100));
@@ -259,6 +298,8 @@ fn main() -> wry::Result<()> {
     ensure_firewall();
 
     let mut child = ensure_daemon();
+    let admin_port = read_admin_port();
+    let admin_url = format!("http://127.0.0.1:{admin_port}");
 
     let event_loop = EventLoopBuilder::<String>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -274,12 +315,12 @@ fn main() -> wry::Result<()> {
         .build(&event_loop)
         .expect("failed to create window");
 
-    let _webview = WebViewBuilder::new(&window)
-        .with_url(ADMIN_URL)
+    let _webview = WebViewBuilder::new()
+        .with_url(&admin_url)
         .with_ipc_handler(move |req| {
             let _ = proxy.send_event(req.body().clone());
         })
-        .build()?;
+        .build(&window)?;
 
     let visible = Arc::new(AtomicBool::new(true));
     let visible_clone = visible.clone();
@@ -307,12 +348,10 @@ fn main() -> wry::Result<()> {
                     visible_clone.store(true, Ordering::SeqCst);
                 }
                 "quit" => {
-                    // Exit the app and stop the daemon we spawned (a daemon
-                    // we did not start — e.g. owned by another window — is
-                    // left alone).
+                    // Exit the app; stop the daemon we spawned gracefully
+                    // first (a daemon we did not start is left alone).
                     if let Some(d) = child.as_mut() {
-                        let _ = d.kill();
-                        let _ = d.wait();
+                        stop_daemon(d, admin_port);
                     }
                     *control_flow = ControlFlow::Exit;
                 }

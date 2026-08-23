@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 tao = "0.30"
-wry = "0.45"
 tray-icon = "0.15"
+wry = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_System_LibraryLoader", "Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
