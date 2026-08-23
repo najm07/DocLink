@@ -286,7 +286,7 @@ async function openSharePanel(path) {
   const note = document.createElement("p");
   note.className = "dim";
   note.textContent =
-    "PCs with full access already see this item. To hide one item from a full-access PC, set their access to Only selected items in Granted access.";
+    "Unchecking a PC hides this item from them — PCs that had full access switch to selected-items mode covering the rest of your share.";
   body.appendChild(note);
   const actions = document.createElement("div");
   actions.className = "sp-actions";

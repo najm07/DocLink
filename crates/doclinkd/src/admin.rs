@@ -288,7 +288,7 @@ async fn resolve_peer_base(
     manual_host: Option<&str>,
 ) -> Option<(String, String)> {
     if let Some(h) = manual_host.map(str::trim).filter(|h| !h.is_empty()) {
-        return Some((format!("http://{h}"), String::new()));
+        return Some((format!("https://{h}"), String::new()));
     }
     let deadline = Instant::now() + DISCOVERY_WAIT;
     loop {
@@ -352,12 +352,22 @@ async fn contact_fingerprint(
         .send()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("peer unreachable: {e}")))?;
+    // Self-certifying check: the TLS certificate must hash to whatever
+    // identity the body advertises, or the peer is lying about itself.
+    let cert_fp = crate::peer::check(&resp, None)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
     let info: NodeInfo = resp
         .json()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("bad peer response: {e}")))?;
     if info.node_id != id {
         return Err(err(StatusCode::CONFLICT, "remote node_id mismatch"));
+    }
+    if !cert_fp.eq_ignore_ascii_case(&info.fingerprint) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "peer certificate does not match its advertised fingerprint — possible MITM",
+        ));
     }
     if !discovered_fp.is_empty() && discovered_fp != info.fingerprint {
         return Err(err(
@@ -411,18 +421,27 @@ async fn add_contact(
     };
 
     // Verify the target's identity before trusting it with our pubkey.
-    let remote_info: NodeInfo = s
+    let info_resp = s
         .inner
         .http
         .get(format!("{base}/v1/info"))
         .send()
         .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("peer unreachable: {e}")))?
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("peer unreachable: {e}")))?;
+    let cert_fp = crate::peer::check(&info_resp, None)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    let remote_info: NodeInfo = info_resp
         .json()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("bad peer response: {e}")))?;
     if remote_info.node_id != id {
         return Err(err(StatusCode::CONFLICT, "remote node_id mismatch"));
+    }
+    if !cert_fp.eq_ignore_ascii_case(&remote_info.fingerprint) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "peer certificate does not match its advertised fingerprint — possible MITM",
+        ));
     }
 
     // Build and sign the pair request.
@@ -452,6 +471,8 @@ async fn add_contact(
         .send()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("pair request failed: {e}")))?;
+    crate::peer::check(&resp, Some(&remote_info.fingerprint))
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
     let status: PairStatusResponse = resp
         .json()
         .await
@@ -508,7 +529,7 @@ async fn contact_status(
         return Err(err(StatusCode::NOT_FOUND, "unknown contact"));
     };
     let base = if let Some(h) = &contact.host {
-        format!("http://{h}")
+        format!("https://{h}")
     } else {
         // Try to find the peer via mDNS registry.
         let peers = s.inner.peers.snapshot();
@@ -528,11 +549,14 @@ async fn contact_status(
     for (k, v) in s.inner.identity.auth_headers("GET", &path_q) {
         req = req.header(k, v);
     }
-    let status: PairStatusResponse = req
+    let resp = req
         .timeout(Duration::from_secs(4))
         .send()
         .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("peer unreachable: {e}")))?
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("peer unreachable: {e}")))?;
+    crate::peer::check(&resp, Some(&contact.fingerprint))
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    let status: PairStatusResponse = resp
         .json()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("bad peer response: {e}")))?;
@@ -610,7 +634,7 @@ async fn push_decision_to_requester(
                 .find(|c| c.node_id == requester_node_id)
                 .and_then(|c| c.host.clone());
             if let Some(h) = host {
-                format!("http://{h}")
+                format!("https://{h}")
             } else {
                 // Fallback: active probe (same as Add PC), when allowed.
                 let found = if s.inner.scan_enabled {
@@ -629,6 +653,19 @@ async fn push_decision_to_requester(
             }
         }
     };
+
+    // The grantee's pinned fingerprint comes from the grant we just wrote.
+    let expected_fp = s
+        .inner
+        .grants
+        .lock()
+        .unwrap()
+        .read()
+        .grants
+        .iter()
+        .find(|g| g.node_id == requester_node_id)
+        .map(|g| g.fingerprint.clone())
+        .unwrap_or_default();
 
     // Build and sign the decision.
     let decision = PairDecision {
@@ -649,7 +686,11 @@ async fn push_decision_to_requester(
     // POST to the requester's data plane (fire-and-forget: the catch-up
     // poller covers the case where this never lands).
     let url = format!("{base}/v1/pair/decision");
-    let _ = s.inner.http.post(&url).json(&decision).send().await;
+    if let Ok(resp) = s.inner.http.post(&url).json(&decision).send().await {
+        if !expected_fp.is_empty() {
+            let _ = crate::peer::check(&resp, Some(&expected_fp));
+        }
+    }
     Ok(())
 }
 
@@ -709,9 +750,78 @@ struct ShareItemBody {
     fingerprints: Vec<String>,
 }
 
+/// Scope value meaning "nothing may be listed or read". The empty list
+/// already means full access, so true zero-access needs a sentinel that
+/// no real path can ever equal.
+const NO_ACCESS: &str = "\u{0}none";
+
+/// Rewrite a grant's scope so that `removed` is no longer visible.
+///
+/// Subtraction on an allowlist requires recursive expansion: every
+/// directory along `removed`'s ancestry that the grant covered is
+/// replaced by its surviving descendants, fetched through
+/// `children(dir)` (the caller pre-enumerated the ancestor chain,
+/// already excluding the removed branch itself). An empty scope (full
+/// access) expands starting at the share root. Returns None when the
+/// scope did not cover `removed`, or a needed listing was unavailable
+/// (fail closed — the scope is left untouched).
+fn subtract_from_scope(
+    paths: &[String],
+    removed: &str,
+    mut children: impl FnMut(&str) -> Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    fn walk(
+        dir: &str,
+        removed: &str,
+        children: &mut impl FnMut(&str) -> Option<Vec<String>>,
+    ) -> Option<Vec<String>> {
+        let mut out = Vec::new();
+        for k in children(dir)? {
+            if k == removed {
+                continue; // the branch being removed
+            }
+            if within(removed, &k) {
+                // k is an ancestor of removed: descend into survivors.
+                out.extend(walk(&k, removed, children)?);
+            } else {
+                out.push(k);
+            }
+        }
+        Some(out)
+    }
+
+    let out: Vec<String> = if paths.is_empty() {
+        walk("", removed, &mut children)?
+    } else {
+        let mut out = Vec::new();
+        let mut changed = false;
+        for p in paths {
+            if p == removed {
+                changed = true; // exact match simply disappears
+            } else if !p.is_empty() && within(removed, p) {
+                // removed lives INSIDE granted dir p.
+                changed = true;
+                out.extend(walk(p, removed, &mut children)?);
+            } else {
+                out.push(p.clone());
+            }
+        }
+        if !changed {
+            return None;
+        }
+        out
+    };
+    Some(if out.is_empty() {
+        vec![NO_ACCESS.to_string()]
+    } else {
+        out
+    })
+}
+
 /// Item-centric sharing: check/uncheck which granted PCs may see one
-/// file or folder. Full-access grants (empty paths) already cover the
-/// item and are left untouched; scoped grants gain or lose the path.
+/// file or folder. Unchecking works for every grantee: full-access PCs
+/// are narrowed to "everything except this item", scoped PCs lose the
+/// item even when it was covered via a granted parent folder.
 async fn share_item(
     State(s): State<AppState>,
     Json(body): Json<ShareItemBody>,
@@ -725,6 +835,54 @@ async fn share_item(
         .resolve(&body.path)
         .map_err(share_err)?;
 
+    // Phase 1 (read lock): does any deselected grant actually cover the
+    // item (full access, or a granted ancestor)? If so, the whole
+    // ancestor chain of the removed path must be enumerated so the
+    // subtraction can expand recursively. (share.list is async, so it
+    // cannot run under the store mutex.)
+    let mut covers_any = false;
+    {
+        let g = s.inner.grants.lock().unwrap();
+        for gr in &g.read().grants {
+            if body.fingerprints.contains(&gr.fingerprint) || covers_any {
+                continue;
+            }
+            covers_any = gr.paths.is_empty()
+                || gr
+                    .paths
+                    .iter()
+                    .any(|p| body.path == *p || within(&body.path, p));
+        }
+    }
+
+    // Phase 2: enumerate the ancestor chain ("" first), minus the
+    // removed branch in every listing.
+    let mut fetched: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    if covers_any {
+        let mut dirs: Vec<String> = vec![String::new()];
+        for (i, b) in body.path.bytes().enumerate() {
+            if b == b'/' && i + 1 < body.path.len() {
+                dirs.push(body.path[..i].to_string());
+            }
+        }
+        for dir in &dirs {
+            let kids = match s.inner.share.list(dir).await {
+                Ok(entries) => entries
+                    .into_iter()
+                    .filter(|e| !(e.path == body.path || within(&e.path, &body.path)))
+                    .map(|e| e.path)
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!(%e, dir = %dir, "cannot enumerate scope parent for unshare");
+                    Vec::new()
+                }
+            };
+            fetched.insert(dir.clone(), kids);
+        }
+    }
+
+    // Phase 3 (write lock): apply additions and subtractions.
     let mut g = s.inner.grants.lock().unwrap();
     for grant in &mut g.data_mut().grants {
         let wanted = body.fingerprints.contains(&grant.fingerprint);
@@ -736,10 +894,12 @@ async fn share_item(
             if !grant.paths.is_empty() && !covered {
                 grant.paths.push(body.path.clone());
             }
-        } else {
-            grant
-                .paths
-                .retain(|p| *p != body.path && !within(p, &body.path));
+        } else if let Some(next) = subtract_from_scope(
+            &grant.paths.clone(),
+            &body.path,
+            |d| fetched.get(d).cloned(),
+        ) {
+            grant.paths = next;
         }
     }
     g.save()
@@ -854,5 +1014,88 @@ mod tests {
         // Lookalike suffix tricks.
         assert!(!authority_allowed("127.0.0.1.evil.com:37656", 37656));
         assert!(!authority_allowed("evillhost:37656", 37656));
+    }
+
+    mod share_scope {
+        use super::super::{subtract_from_scope, NO_ACCESS};
+        use std::collections::HashMap;
+
+        fn fetcher(
+            map: Vec<(&'static str, Vec<&'static str>)>,
+        ) -> impl FnMut(&str) -> Option<Vec<String>> {
+            let m: HashMap<String, Vec<String>> = map
+                .into_iter()
+                .map(|(d, kids)| (d.to_string(), kids.into_iter().map(String::from).collect()))
+                .collect();
+            move |dir| m.get(dir).cloned()
+        }
+
+        #[test]
+        fn exact_drop_from_scoped_grant() {
+            let paths = vec!["docs".into(), "a.txt".into()];
+            let next = subtract_from_scope(&paths, "a.txt", |_| None).unwrap();
+            assert_eq!(next, vec!["docs"]);
+        }
+
+        #[test]
+        fn full_access_narrows_to_root_minus_branch() {
+            let f = fetcher(vec![
+                (
+                    "",
+                    vec!["docs", "private", "z.txt"],
+                ),
+                ("private", vec!["private/secret.txt"]),
+            ]);
+            let next = subtract_from_scope(&[], "private/secret.txt", f).unwrap();
+            assert_eq!(next, vec!["docs", "z.txt"]);
+        }
+
+        #[test]
+        fn covering_parent_expands_to_siblings() {
+            // Grant covers everything via ["docs"]; removing docs/a.txt
+            // must keep b/ and c.txt visible but drop the a-branch.
+            let f = fetcher(vec![(
+                "docs",
+                vec!["docs/a.txt", "docs/b", "docs/c.txt"],
+            )]);
+            let next = subtract_from_scope(&["docs".into()], "docs/a.txt", f).unwrap();
+            assert_eq!(next, vec!["docs/b", "docs/c.txt"]);
+        }
+
+        #[test]
+        fn no_coverage_is_a_noop() {
+            assert!(subtract_from_scope(&["other".into()], "docs/a.txt", |_| None).is_none());
+        }
+
+        #[test]
+        fn emptied_scope_becomes_no_access_not_full() {
+            // Removing the ONLY child of a granted dir must NOT flip to
+            // full access (empty list semantics).
+            let f = fetcher(vec![("docs", vec!["docs/gone.txt"])]); // nothing survives
+            let next = subtract_from_scope(&["docs".into()], "docs/gone.txt", f).unwrap();
+            assert_eq!(next, vec![NO_ACCESS.to_string()]);
+        }
+
+        #[test]
+        fn deep_target_expands_every_level() {
+            // Full access minus drop/nested/file.bin keeps "keep" and the
+            // surviving sibling, while empty intermediate dirs collapse.
+            let f = fetcher(vec![
+                ("", vec!["keep", "drop"]),
+                ("drop", vec!["drop/nested"]),
+                (
+                    "drop/nested",
+                    vec!["drop/nested/file.bin", "drop/nested/sibling.txt"],
+                ),
+            ]);
+            let next = subtract_from_scope(&[], "drop/nested/file.bin", f).unwrap();
+            assert_eq!(next, vec!["keep", "drop/nested/sibling.txt"]);
+        }
+
+        #[test]
+        fn missing_listing_fails_closed() {
+            // No listing for the covering parent -> scope untouched.
+            assert!(subtract_from_scope(&["docs".into()], "docs/a.txt", |_| None).is_none());
+        }
     }
 }
