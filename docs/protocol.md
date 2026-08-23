@@ -1,4 +1,4 @@
-# DocLink wire protocol — v0.2
+# DocLink wire protocol — v0.3
 
 This document is the language-neutral specification. `doclink-core` is the
 reference implementation; any future client (C#, PrintLink interop) conforms
@@ -27,7 +27,7 @@ Two HTTP planes per node:
 
 | Plane | Bind | Purpose |
 |---|---|---|
-| Data | `0.0.0.0:37655` | Peer-facing: info, pairing, authenticated list/file |
+| Data | `tls://0.0.0.0:37655` | Peer-facing, TLS 1.3 with pinned identity certs: info, pairing, authenticated list/file |
 | Admin | `127.0.0.1:37656` | Localhost-only: window UI, contacts, approvals, revocation, scoping, own-share management, browse proxy |
 
 Management operations are unreachable from the LAN by construction.
@@ -186,8 +186,14 @@ request from that node reflects them.
 
 ## 9. Security notes
 
-- v0.2 authenticates but does not encrypt: traffic is plain HTTP on the
-  LAN. v0.3 (M4) adds TLS with pinned peer certificates.
+- v0.3 encrypts: the data plane speaks TLS 1.3 only. Each node presents
+  a self-signed certificate whose subjectPublicKey IS its ed25519
+  identity key, so sha256(SPKI) == fingerprint. Peers pin that hash —
+  there is no CA and no second trust anchor; the number a human verified
+  during pairing guards both signatures and transport. Connections whose
+  certificate does not hash to the expected fingerprint are refused
+  before any payload is trusted. The admin plane remains plain HTTP on
+  localhost.
 - The admin plane trusts localhost. On shared machines, any local user can
   manage the node — acceptable for single-user office PCs, revisited in M4.
   Cross-process web attacks (DNS rebinding, CSRF) are mitigated by the

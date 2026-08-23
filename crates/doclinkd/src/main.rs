@@ -1,11 +1,13 @@
 mod admin;
 mod auth;
 mod config;
+mod peer;
 mod proxy;
 mod scan;
 mod server;
 mod share;
 mod store;
+mod tls;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -52,7 +54,13 @@ async fn run_peer_keepalive(
                         .timeout(std::time::Duration::from_secs(2))
                         .send()
                         .await
-                        .map(|r| r.status().is_success())
+                        .map(|r| {
+                            // Liveness only: require a well-formed ed25519
+                            // cert; the pin (when known) is enforced on
+                            // the authenticated paths.
+                            crate::peer::check(&r, None).is_ok()
+                                && r.status().is_success()
+                        })
                         .unwrap_or(false);
                     if ok {
                         registry.touch(&peer.node_id);
@@ -110,11 +118,10 @@ async fn main() -> Result<()> {
 
     let http_port = cfg.http_port();
 
-    // One shared HTTP client for all outbound peer calls. No global
-    // timeout — file downloads are long — call sites set their own.
-    let http = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .build()?;
+    // One shared client for all outbound peer calls: pinned-cert HTTPS
+    // (danger mode + TlsInfo; verification happens in peer::check). No
+    // global timeout — file downloads are long — call sites set their own.
+    let http = peer::client();
 
     // mDNS advertiser: register our service so other PCs can resolve our ID.
     if cfg.advertise() {
@@ -163,12 +170,17 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     ));
 
-    // Data plane: LAN-facing, signature-authenticated, read-only, scope-filtered.
+    // Data plane: LAN-facing, TLS-only (v0.3), signature-authenticated,
+    // read-only, scope-filtered. The certificate is derived from the node
+    // identity, so peers pin sha256(SPKI) == fingerprint.
     let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), contacts.clone(), pairing.clone());
     let data_app = server::router(data_state);
     let data_addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
     let data_tcp = tokio::net::TcpListener::bind(data_addr).await?;
-    info!(%data_addr, "share API (peer-facing) listening");
+    let node_tls = doclink_core::cert::NodeTls::from_identity(&identity)
+        .context("deriving node TLS certificate")?;
+    let data_tls_cfg = tls::server_config(&node_tls)?;
+    info!(%data_addr, "share API (peer-facing) listening on TLS");
 
     // Admin plane: localhost only — window UI, contacts, approvals, proxy.
     let admin_port = http_port + 1;
@@ -194,12 +206,11 @@ async fn main() -> Result<()> {
     // tools) can find this instance even with a --port override.
     let _ = std::fs::write("doclink-admin.port", admin_port.to_string());
 
-    let data = axum::serve(
-        data_tcp,
-        data_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(wait_shutdown(shutdown_rx.clone()));
+    let data = tls::serve(data_tcp, data_app, data_tls_cfg, shutdown_rx.clone());
     let admin = axum::serve(admin_tcp, admin_app).with_graceful_shutdown(wait_shutdown(shutdown_rx));
-    tokio::try_join!(data, admin)?;
+    tokio::try_join!(
+        async { data.await.map_err(anyhow::Error::from) },
+        async { admin.await.map_err(anyhow::Error::from) }
+    )?;
     Ok(())
 }

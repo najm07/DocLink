@@ -196,6 +196,11 @@ pub async fn run_pair_verifier(
                     let Some(p) = peers.snapshot().into_iter().find(|p| p.node_id == node_id) else {
                         continue;
                     };
+                    // Pin to the contact's recorded fingerprint.
+                    let Some(expected_fp) = contacts.lock().unwrap().read().contacts
+                        .iter().find(|c| c.node_id == node_id)
+                        .map(|c| c.fingerprint.clone())
+                    else { continue };
                     let path_q = format!("/v1/pair/status?node_id={}", urlencoding::encode(&my_id));
                     let url = format!(
                         "{}{}",
@@ -209,6 +214,9 @@ pub async fn run_pair_verifier(
                     let Ok(resp) = req.timeout(Duration::from_secs(2)).send().await else {
                         continue;
                     };
+                    if crate::peer::check(&resp, Some(&expected_fp)).is_err() {
+                        continue;
+                    }
                     let Ok(status) = resp.json::<PairStatusResponse>().await else {
                         continue;
                     };

@@ -22,3 +22,7 @@ urlencoding = { workspace = true }
 reqwest = { workspace = true }
 rust-embed = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }

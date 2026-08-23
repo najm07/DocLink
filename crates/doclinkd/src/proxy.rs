@@ -10,6 +10,8 @@ use doclink_core::protocol::ErrorResponse;
 
 struct PeerTarget {
     base: String,
+    /// Fingerprint to pin the TLS connection against ("" = unknown).
+    fingerprint: String,
 }
 
 #[derive(Debug)]
@@ -33,9 +35,12 @@ impl IntoResponse for ProxyError {
 
 fn peer_lookup(s: &AppState, node_id: &str) -> Result<PeerTarget, ProxyError> {
     let contacts = s.inner.contacts.lock().unwrap().read().clone();
-    if !contacts.contacts.iter().any(|c| c.node_id == node_id) {
-        return Err(ProxyError::UnknownPeer);
-    }
+    let known = contacts
+        .contacts
+        .iter()
+        .find(|c| c.node_id == node_id)
+        .ok_or(ProxyError::UnknownPeer)?
+        .clone();
     if let Some(peer) = s
         .inner
         .peers
@@ -45,16 +50,13 @@ fn peer_lookup(s: &AppState, node_id: &str) -> Result<PeerTarget, ProxyError> {
     {
         return Ok(PeerTarget {
             base: doclink_core::protocol::peer_base_url(&peer.addr, peer.http_port),
+            fingerprint: known.fingerprint,
         });
     }
-    if let Some(host) = contacts
-        .contacts
-        .iter()
-        .find(|c| c.node_id == node_id)
-        .and_then(|c| c.host.clone())
-    {
+    if let Some(host) = known.host.clone() {
         return Ok(PeerTarget {
-            base: format!("http://{host}"),
+            base: format!("https://{host}"),
+            fingerprint: known.fingerprint,
         });
     }
     Err(ProxyError::UnknownPeer)
@@ -83,6 +85,8 @@ pub async fn list(
         .send()
         .await
         .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    crate::peer::check(&resp, Some(&target.fingerprint))
+        .map_err(ProxyError::Upstream)?;
     let status = resp.status();
     let body = resp
         .text()
@@ -111,6 +115,8 @@ pub async fn file(
         .send()
         .await
         .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    crate::peer::check(&resp, Some(&target.fingerprint))
+        .map_err(ProxyError::Upstream)?;
     let status = resp.status();
     let ctype = resp
         .headers()

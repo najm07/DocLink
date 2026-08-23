@@ -23,7 +23,7 @@ Peer-to-peer LAN file sharing for Windows — read-only shares, no upload, no ce
 
 ## Protocol
 
-See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.2).
+See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.3, TLS with pinned identity certificates). Two-PC hardware verification: [`docs/lan-test.md`](docs/lan-test.md) (+ `.\lan-test.ps1`).
 
 ## Roadmap
 
@@ -75,7 +75,7 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.2).
 
 ### M4 — Encryption and packaging
 
-- [ ] TLS with pinned peer certificates (protocol v0.3)
+- [x] TLS with pinned peer certificates (protocol v0.3 — cert SPKI is the ed25519 identity key)
 - [x] Identity key file permissions hardening (icacls/chmod 600 on load + creation)
 - [ ] Proper installer (MSI via cargo-wix, mirror Printlink's approach)
 - [ ] Autostart on login (registry Run key or Scheduled Task)
