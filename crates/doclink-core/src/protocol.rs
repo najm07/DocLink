@@ -101,6 +101,16 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Base URL for a discovered peer address. IPv6 literals must be
+/// bracketed or reqwest rejects the URL ("builder error").
+pub fn peer_base_url(addr: &str, port: u16) -> String {
+    if addr.contains(':') {
+        format!("http://[{addr}]:{port}")
+    } else {
+        format!("http://{addr}:{port}")
+    }
+}
+
 // ---- Pairing (protocol v0.2) ----
 
 /// POST /v1/pair/request body. `signature` covers canonical_request_string().

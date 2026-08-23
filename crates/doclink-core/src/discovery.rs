@@ -65,9 +65,28 @@ impl PeerRegistry {
 }
 
 /// Primary interface IPv4, derived from the routing table.
-fn primary_ipv4() -> Option<Ipv4Addr> {
+///
+/// `UdpSocket::connect` only consults the routing table — no packets are
+/// sent — so this also works on LANs without internet: the targets are
+/// tried in order and the mDNS multicast group picks a multicast-capable
+/// interface even when no default route exists.
+pub fn primary_ipv4() -> Option<Ipv4Addr> {
+    const PROBES: [([u8; 4], u16); 3] = [
+        ([8, 8, 8, 8], 80),       // default route, if any
+        ([1, 1, 1, 1], 443),      // secondary public target
+        ([224, 0, 0, 251], 5353), // mDNS group → any LAN iface
+    ];
+    for (ip, port) in PROBES {
+        if let Some(v4) = probe_ipv4(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]), port) {
+            return Some(v4);
+        }
+    }
+    None
+}
+
+fn probe_ipv4(target: Ipv4Addr, port: u16) -> Option<Ipv4Addr> {
     let s = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    s.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
+    s.connect((target, port)).ok()?;
     match s.local_addr().ok()?.ip() {
         IpAddr::V4(v4) if !v4.is_loopback() => Some(v4),
         _ => None,
@@ -109,6 +128,25 @@ pub fn start_advertiser(
     Some(daemon)
 }
 
+/// Pick the most usable address a resolved service advertises.
+/// Routable IPv4 first, then loopback IPv4, then global IPv6, and
+/// link-local IPv6 last (it needs a scope-id and produces invalid URLs
+/// like `http://fe80::1:37655`).
+fn pick_addr(info: &mdns_sd::ServiceInfo) -> Option<String> {
+    fn score(a: &std::net::IpAddr) -> u8 {
+        match a {
+            std::net::IpAddr::V4(v4) if v4.is_loopback() => 1,
+            std::net::IpAddr::V4(_) => 0,
+            std::net::IpAddr::V6(v6) if v6.is_unicast_link_local() => 3,
+            std::net::IpAddr::V6(_) => 2,
+        }
+    }
+    info.get_addresses()
+        .iter()
+        .min_by_key(|a| score(a))
+        .map(|a| a.to_string())
+}
+
 /// mDNS browser: watches for _doclink._tcp.local services and updates the
 /// registry with any peers we see. Runs until shutdown.
 pub async fn run_browser(
@@ -146,7 +184,7 @@ pub async fn run_browser(
                                 .get("http_port")
                                 .and_then(|p| p.val_str().parse::<u16>().ok())
                                 .unwrap_or(37655);
-                            let addr = info.get_addresses().iter().next().map(|a| a.to_string());
+                            let addr = pick_addr(&info);
                             if let Some(addr) = addr {
                                 registry.upsert(Peer {
                                     node_id,
@@ -172,6 +210,7 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
+    #[allow(non_snake_case)]
     async fn mDNS_roundtrip_registers_peer_by_id() {
         let registry = PeerRegistry::new();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
