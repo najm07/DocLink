@@ -13,3 +13,5 @@
 
 # graphify knowledge graph output
 /graphify-out
+
+/build.log

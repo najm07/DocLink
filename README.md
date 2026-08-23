@@ -66,17 +66,17 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.2).
 - [x] VS Code-style workbench chrome (frameless window, activity bar, status bar)
 - [x] My Share view: browse/manage own share, delete items, reveal in Explorer
 - [x] Share… panel per item; Access editor per grant (Everything / selected items)
-- [ ] Streaming downloads + `Range` support (no whole-file buffering)
+- [x] Streaming downloads + `Range` support (no whole-file buffering)
 - [ ] Print button: download to temp, then Windows shell `print` verb via windows-rs (`ShellExecuteEx`)
 - [ ] Toast notifications (pair request received, grant expiring soon)
-- [ ] Graceful shutdown (Ctrl-C / service stop)
+- [x] Graceful shutdown (tray Quit / Ctrl-C; admin stop endpoint)
 - [x] Contact status refresh: pending contacts re-poll the grantor's `/v1/pair/status`, and peers stay live via TCP keepalive (mDNS re-announcements alone don't refresh liveness)
 - [x] Tray icon so the daemon is visible/manageable without the window (Open / Quit)
 
 ### M4 — Encryption and packaging
 
 - [ ] TLS with pinned peer certificates (protocol v0.3)
-- [ ] Identity key file permissions hardening
+- [x] Identity key file permissions hardening (icacls/chmod 600 on load + creation)
 - [ ] Proper installer (MSI via cargo-wix, mirror Printlink's approach)
 - [ ] Autostart on login (registry Run key or Scheduled Task)
 

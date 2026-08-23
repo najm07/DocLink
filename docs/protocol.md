@@ -59,36 +59,49 @@ current IP and shows online/offline. It grants no trust.
 
 ## 4. Authentication
 
-Authenticated data-plane requests carry four headers:
+Authenticated data-plane requests carry five headers:
 
 ```
-x-doclink-node: <node_id>
-x-doclink-pub:  <ed25519 public key, hex>
-x-doclink-ts:   <unix seconds>
-x-doclink-sig:  <hex ed25519 signature>
+x-doclink-node:  <node_id>
+x-doclink-pub:   <ed25519 public key, hex>
+x-doclink-ts:    <unix seconds>
+x-doclink-nonce: <random hex, unique per request>
+x-doclink-sig:   <hex ed25519 signature>
 ```
 
-Signature input (UTF-8, `\n`-joined, trailing newline after ts):
+Signature input (UTF-8, `\n`-joined, trailing newline after nonce):
 
 ```
 <METHOD>
 <PATH>?<QUERY>
 <TS>
+<NONCE>
 <BODY>
 ```
 
+The nonce makes every signature unique even when two requests land in
+the same second — required for the anti-replay cache to coexist with
+fast successive calls to the same path. Senders MUST generate a fresh
+random nonce per request.
+
 Verification rules (publisher MUST enforce):
 
-1. Timestamp within ±300 s of now → else `401`.
+1. Timestamp within ±900 s of now → else `401`. (Generous on purpose:
+   LAN PCs drift; see `auth.rs`.)
 2. A live grant exists for `x-doclink-node` (not expired, not revoked)
    → else `403`.
 3. hex(sha256(`x-doclink-pub`)) == grant.fingerprint → else `403`.
 4. Signature verifies under `x-doclink-pub` → else `401`.
+5. The signature has not already been accepted within the current
+   window → else `401` (anti-replay; in-memory cache, per node).
 
 ## 5. Pairing workflow
 
 1. Requester resolves the target ID (discovery or manual host), fetches
-   `GET /v1/info`, and verifies node_id and fingerprint.
+   `GET /v1/info`, and verifies node_id and fingerprint. The requester's
+   UI shows the target's full 64-hex fingerprint and gates Add on an
+   explicit human confirmation that it matches the peer's own display —
+   the 16-hex ID alone is a 64-bit hash and must not be trusted blindly.
 2. Requester sends `POST /v1/pair/request`:
 
 ```json
@@ -115,10 +128,13 @@ Verification rules (publisher MUST enforce):
 |---|---|---|
 | `GET /v1/info` | none | `NodeInfo` (needed to verify pairing targets) |
 | `GET /v1/list?path=<rel>` | required | `ListResponse`, scope-filtered |
-| `GET /v1/file?path=<rel>` | required | file bytes, `Content-Disposition: attachment` |
+| `GET /v1/file?path=<rel>` | required | file bytes, streamed; single `Range` supported (`206` + `Content-Range`, `416` when unsatisfiable), `Content-Disposition: attachment` |
 | `POST /v1/pair/request` | self-signed body | `PairStatusResponse` |
-| `POST /v1/pair/decision` | self-signed body | `204` |
-| `GET /v1/pair/status` | none | `PairStatusResponse` |
+| `POST /v1/pair/decision` | self-signed body **from a known grantor** | `204`; decisions from unpaired keys are rejected (`403`) |
+| `GET /v1/pair/status?node_id=<id>` | signed poll — caller must authenticate as the queried node (pubkey must hash to it) | `PairStatusResponse` |
+
+Pairing endpoints are additionally rate-limited per source IP; pending
+requests expire after 10 minutes and the pending queue is capped.
 
 Path rules: no absolute paths, no `..`, no drive prefixes; canonicalized
 paths must stay under the share root (`403`), missing paths `404`.
@@ -141,6 +157,7 @@ Each grant carries `paths: []`:
 |---|---|
 | `GET /v1/admin/info` | This node (ID shown in the window header) |
 | `GET/POST /v1/admin/contacts` | List / add-by-ID (sends the pair request) |
+| `GET /v1/admin/contact-fingerprint` | Resolve an ID to its full fingerprint — shown for verification BEFORE any pair request |
 | `DELETE /v1/admin/contacts/{id}` | Remove a contact |
 | `GET /v1/admin/requests` | Incoming pending pair requests |
 | `POST /v1/admin/requests/{id}/decision` | Approve (with duration) or deny |
@@ -151,7 +168,13 @@ Each grant carries `paths: []`:
 | `GET /v1/admin/myshare/list?path=` | List my own share (owner view) |
 | `DELETE /v1/admin/myshare?path=` | Delete a file/folder from my share |
 | `POST /v1/admin/myshare/reveal` | Open the share folder in Explorer |
+| `POST /v1/admin/shutdown` | Graceful daemon stop (used by the window shell) |
 | `GET /v1/admin/browse/{id}/list\|file` | Signed proxy to a contact's share |
+
+Every admin request must carry a local Host header
+(`127.0.0.1:<port>` / `localhost:<port>`) and any Origin/Referer must
+match it; violations get `404`. This closes DNS-rebinding and cross-site
+request paths against the management plane.
 
 ## 8. Grants
 
@@ -167,8 +190,14 @@ request from that node reflects them.
   LAN. v0.3 (M4) adds TLS with pinned peer certificates.
 - The admin plane trusts localhost. On shared machines, any local user can
   manage the node — acceptable for single-user office PCs, revisited in M4.
-- Discovery beacons are spoofable by design; pairing decisions never rely
-  on beacon data alone (fingerprint cross-check in §5 step 1).
+  Cross-process web attacks (DNS rebinding, CSRF) are mitigated by the
+  Host/Origin guard on every admin route.
+- Discovery (mDNS) is only an address book; pairing requires the human to
+  verify the full 64-hex fingerprint out of band (Add PC flow gates on it).
+  The 16-hex DocLink ID alone is only a 64-bit hash and MUST NOT be the
+  sole trust anchor.
+- Identity keys are ACL-restricted to the current user at creation (and
+  re-hardened on load).
 
 ## 10. Future extensions (reserved)
 
