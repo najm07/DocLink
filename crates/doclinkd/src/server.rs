@@ -107,15 +107,19 @@ pub(crate) struct Inner {
     pub seen_sigs: Arc<Mutex<HashMap<String, u64>>>,
     /// Per-IP limiter for the unauthenticated pairing endpoints.
     pub pair_limiter: RateLimiter,
+    /// Toast/notification events (pair requests, expiring grants).
+    pub events: crate::events::SharedEvents,
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: &Config,
         node: NodeInfo,
         grants: SharedStore<GrantsFile>,
         contacts: SharedStore<ContactsFile>,
         pairing: PairingState,
+        events: crate::events::SharedEvents,
     ) -> Self {
         let share = ShareRoot::new(cfg.share_root.clone()).expect("share root must be creatable");
         Self {
@@ -127,6 +131,7 @@ impl AppState {
                 pairing,
                 seen_sigs: Arc::new(Mutex::new(HashMap::new())),
                 pair_limiter: RateLimiter::default(),
+                events,
             }),
         }
     }
@@ -180,6 +185,15 @@ fn unix_now() -> u64 {
 
 fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
     (status, Json(ErrorResponse::new(msg)))
+}
+
+/// Grouped hex for display: `9f2c-1ab0-7e44-d310`.
+fn group_hex(id: &str) -> String {
+    id.as_bytes()
+        .chunks(4)
+        .map(|c| std::str::from_utf8(c).unwrap_or(id))
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 // ---- Grant path scoping ----
@@ -431,7 +445,27 @@ async fn pair_request(
         }
     }
 
-    admit_pending(&s.inner.pairing, req).map_err(|m| err(StatusCode::TOO_MANY_REQUESTS, m))?;
+    let is_new_request = !s
+        .inner
+        .pairing
+        .pending
+        .lock()
+        .unwrap()
+        .contains_key(&req.node_id);
+    admit_pending(&s.inner.pairing, req.clone())
+        .map_err(|m| err(StatusCode::TOO_MANY_REQUESTS, m))?;
+    if is_new_request {
+        // Toast material for the owner (idempotent: refreshed requests
+        // from the same node do not re-announce).
+        s.inner.events.lock().unwrap().push(
+            "pair-request",
+            format!("{} wants access to your files", req.name),
+            format!(
+                "Approve or deny it in the Incoming list. DocLink ID {}.",
+                group_hex(&req.node_id)
+            ),
+        );
+    }
     Ok(Json(PairStatusResponse {
         status: PairStatus::Pending,
         expires_unix: None,

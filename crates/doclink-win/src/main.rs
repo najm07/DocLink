@@ -293,6 +293,221 @@ fn rounded_rect(ax: f32, ay: f32, half: f32, corner: f32) -> bool {
     }
 }
 
+// ---- Toast notifications (pair requests, expiring grants) ----
+
+/// One event as delivered by the daemon's /v1/admin/events feed.
+#[derive(serde::Deserialize)]
+struct DaemonEvent {
+    id: u64,
+    title: String,
+    body: String,
+}
+
+const TOAST_CURSOR_FILE: &str = "doclink-events.cursor";
+
+fn load_cursor() -> u64 {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Ok(t) = std::fs::read_to_string(dir.join(TOAST_CURSOR_FILE)) {
+                return t.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    0
+}
+
+fn save_cursor(id: u64) {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = std::fs::write(dir.join(TOAST_CURSOR_FILE), id.to_string());
+        }
+    }
+}
+
+/// Minimal HTTP GET over a raw TCP stream — localhost admin plane only,
+/// no TLS, no response-body framing surprises (small JSON array).
+fn http_get_json(port: u16, path: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = TcpStream::connect((ADMIN_ADDR.0, port)).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .ok()?;
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let body = text.split_once("\r\n\r\n")?.1;
+    // De-chunk if the server used chunked framing.
+    if text.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        Some(dechunk(body))
+    } else {
+        Some(body.to_string())
+    }
+}
+
+fn dechunk(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some((len_line, remainder)) = rest.split_once("\r\n") {
+        let Ok(len) = usize::from_str_radix(len_line.trim(), 16) else { break };
+        if len == 0 || remainder.len() < len {
+            break;
+        }
+        out.push_str(&remainder[..len]);
+        rest = &remainder[len..];
+        match rest.strip_prefix("\r\n") {
+            Some(r) => rest = r,
+            None => break,
+        }
+    }
+    out
+}
+
+/// Background poller: fetches new daemon events and forwards each to the
+/// UI thread. The cursor file prevents duplicates across app restarts;
+/// a missing/zero cursor re-baselines silently on the first successful
+/// poll instead of replaying stale history.
+fn spawn_event_poller(proxy: tao::event_loop::EventLoopProxy<String>) {
+    std::thread::spawn(move || {
+        let mut last: u64 = load_cursor();
+        let mut primed = last != 0;
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let port = read_admin_port();
+            let Some(body) = http_get_json(port, &format!("/v1/admin/events?since={last}"))
+            else {
+                continue; // daemon not up yet / restarting — keep trying
+            };
+            let Ok(events) = serde_json::from_str::<Vec<DaemonEvent>>(&body) else {
+                continue;
+            };
+            if !primed {
+                // First contact after launch: adopt the current tip so an
+                // old backlog does not spam toasts, then show live ones.
+                primed = true;
+                if let Some(tip) = events.last() {
+                    last = tip.id;
+                    save_cursor(last);
+                }
+                continue;
+            }
+            for ev in &events {
+                if ev.id > last {
+                    let title = sanitize(&ev.title);
+                    let body_line = sanitize(&ev.body);
+                    let _ = proxy.send_event(format!("toast-show|{title}|{body_line}"));
+                    last = ev.id;
+                }
+            }
+            if last != 0 {
+                save_cursor(last);
+            }
+        }
+    });
+}
+
+/// Titles/bodies travel through our pipe-delimited user-event channel.
+fn sanitize(s: &str) -> String {
+    s.replace('|', "/")
+}
+
+/// Owns the single pre-built toast card (created hidden at startup on
+/// the event-loop thread). Shows queue one-at-a-time; extras wait.
+struct Toasts {
+    card: Option<(tao::window::Window, wry::WebView)>,
+    queue: std::collections::VecDeque<(String, String)>,
+}
+
+impl Toasts {
+    /// Build the hidden card now (must run on the event-loop thread):
+    /// frameless, always-on-top, bottom-right of the primary monitor.
+    fn create(
+        event_loop: &tao::event_loop::EventLoop<String>,
+        proxy: tao::event_loop::EventLoopProxy<String>,
+        near: &tao::window::Window,
+    ) -> Option<Self> {
+        const W: f64 = 360.0;
+        const H: f64 = 96.0;
+        let screen = near
+            .primary_monitor()
+            .map(|m| m.size())
+            .unwrap_or_else(|| tao::dpi::PhysicalSize::new(1920u32, 1080u32));
+        let win = tao::window::WindowBuilder::new()
+            .with_title("DocLink notification")
+            .with_decorations(false)
+            .with_always_on_top(true)
+            .with_resizable(false)
+            .with_visible(false)
+            .with_inner_size(LogicalSize::new(W, H))
+            .build(event_loop).ok()?;
+        win.set_outer_position(tao::dpi::PhysicalPosition::new(
+            screen.width.saturating_sub((W as u32) + 20),
+            screen.height.saturating_sub((H as u32) + 48),
+        ));
+        let html = "<!doctype html><html><head><meta charset='utf-8'><style>
+            body{margin:0;font-family:'Segoe UI',system-ui,sans-serif;background:#1f2430;
+                 border:1px solid #3a4152;border-radius:10px;color:#e8eaf0;padding:14px 16px 18px;
+                 cursor:pointer;overflow:hidden}
+            .t{font-weight:600;font-size:13px;margin-bottom:5px}
+            .b{font-size:12px;opacity:.85;line-height:1.4}
+            .bar{position:absolute;left:16px;right:16px;bottom:9px;height:2px;background:#0078d4;
+                  transform-origin:left;animation:shrink 6s linear forwards}
+            @keyframes shrink{to{transform:scaleX(0)}}
+            </style></head><body onclick=\"window.ipc.postMessage('toast-open')\">
+            <div class='t' id='t'></div><div class='b' id='b'></div><div class='bar' id='bar'></div>
+            <script>
+            function showToast(t,b){
+              document.getElementById('t').textContent=t;
+              document.getElementById('b').textContent=b;
+              var bar=document.getElementById('bar');
+              bar.style.animation='none'; void bar.offsetWidth; bar.style.animation='';
+              clearTimeout(window.__t);
+              window.__t=setTimeout(function(){window.ipc.postMessage('toast-close')},6000);
+            }
+            </script></body></html>".to_string();
+        let webview = WebViewBuilder::new()
+            .with_html(html)
+            .with_ipc_handler(move |req| {
+                // Route through the user-event channel so all window
+                // mutation stays on the event-loop thread.
+                let _ = proxy.send_event(req.body().clone());
+            })
+            .build(&win).ok()?;
+        Some(Self {
+            card: Some((win, webview)),
+            queue: std::collections::VecDeque::new(),
+        })
+    }
+
+    fn show(&mut self, title: String, body: String) {
+        let Some((win, webview)) = self.card.as_ref() else {
+            return;
+        };
+        let script = format!(
+            "showToast({}, {});",
+            serde_json::to_string(&title).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(&body).unwrap_or_else(|_| "\"\"".into()),
+        );
+        if webview.evaluate_script(&script).is_ok() {
+            win.set_visible(true);
+        }
+    }
+
+    fn close_current(&mut self) {
+        if let Some((win, _)) = self.card.as_ref() {
+            win.set_visible(false);
+        }
+        // The card itself persists, so a queued follow-up shows
+        // immediately without any teardown race.
+        if let Some((t, b)) = self.queue.pop_front() {
+            self.show(t, b);
+        }
+    }
+}
+
 fn main() -> wry::Result<()> {
     #[cfg(windows)]
     ensure_firewall();
@@ -303,6 +518,10 @@ fn main() -> wry::Result<()> {
 
     let event_loop = EventLoopBuilder::<String>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    // Dedicated clones for the pieces that outlive the main webview's
+    // move of `proxy` into its IPC handler.
+    let toast_proxy = proxy.clone();
+    let poller_proxy = proxy.clone();
 
     #[cfg(windows)]
     let _tray = run_tray(proxy.clone());
@@ -325,6 +544,21 @@ fn main() -> wry::Result<()> {
     let visible = Arc::new(AtomicBool::new(true));
     let visible_clone = visible.clone();
 
+    // Toast state: one pre-built hidden card; extras queue behind it.
+    // The poller thread runs for the process lifetime and forwards new
+    // daemon events as "toast-show|<title>|<body>" user events.
+    let mut toasts = match Toasts::create(&event_loop, toast_proxy, &window) {
+        Some(t) => t,
+        None => {
+            eprintln!("toast card unavailable");
+            Toasts {
+                card: None,
+                queue: std::collections::VecDeque::new(),
+            }
+        }
+    };
+    spawn_event_poller(poller_proxy);
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
@@ -343,6 +577,21 @@ fn main() -> wry::Result<()> {
                     visible_clone.store(false, Ordering::SeqCst);
                 }
                 "open" => {
+                    window.set_visible(true);
+                    window.set_focus();
+                    visible_clone.store(true, Ordering::SeqCst);
+                }
+                _ if cmd.starts_with("toast-show|") => {
+                    let rest = &cmd["toast-show|".len()..];
+                    let (title, body) = match rest.split_once('|') {
+                        Some(x) => x,
+                        None => (rest, ""),
+                    };
+                    toasts.show(title.to_string(), body.to_string());
+                }
+                "toast-close" => toasts.close_current(),
+                "toast-open" => {
+                    toasts.close_current();
                     window.set_visible(true);
                     window.set_focus();
                     visible_clone.store(true, Ordering::SeqCst);
@@ -371,3 +620,4 @@ fn main() -> wry::Result<()> {
     #[allow(unreachable_code)]
     Ok(())
 }
+

@@ -147,16 +147,36 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Periodically prune expired grants and persist the change.
+/// Announce grants entering their final day, then prune expired ones.
 pub async fn run_expiry_sweeper(
     store: SharedStore<GrantsFile>,
+    events: crate::events::SharedEvents,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
+    const EXPIRING_SOON_SECS: u64 = 24 * 3600;
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                let now = unix_now();
                 let mut g = store.lock().unwrap();
+                // Announce each (grant, expiry) pair exactly once while it
+                // is within the warning window. Renewals change expires_unix
+                // and thus announce again when the new deadline nears.
+                {
+                    let mut ev = events.lock().unwrap();
+                    for gr in g.read().grants.iter() {
+                        if let Some(exp) = gr.expires_unix {
+                            if exp > now && exp - now <= EXPIRING_SOON_SECS && ev.claim_expiry(&gr.fingerprint, exp) {
+                                ev.push(
+                                    "grant-expiring",
+                                    format!("Access for {} expires soon", gr.name),
+                                    "Renew it from Granted access, or let it lapse.".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
                 if g.data_mut().prune_expired(unix_now()) {
                     if let Err(e) = g.save() {
                         tracing::warn!(%e, "failed to persist grants after expiry sweep");

@@ -45,6 +45,8 @@ pub(crate) struct AdminInner {
     pub http: reqwest::Client,
     /// Triggers the daemon-wide graceful shutdown.
     pub shutdown: tokio::sync::watch::Sender<bool>,
+    /// Toast/notification event log shared with the data plane.
+    pub events: crate::events::SharedEvents,
 }
 
 impl AppState {
@@ -61,6 +63,7 @@ impl AppState {
         scan_enabled: bool,
         http: reqwest::Client,
         shutdown: tokio::sync::watch::Sender<bool>,
+        events: crate::events::SharedEvents,
     ) -> Self {
         Self {
             inner: Arc::new(AdminInner {
@@ -75,6 +78,7 @@ impl AppState {
                 scan_enabled,
                 http,
                 shutdown,
+                events,
             }),
         }
     }
@@ -100,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/myshare", delete(myshare_delete))
         .route("/v1/admin/myshare/reveal", post(myshare_reveal))
         .route("/v1/admin/shutdown", post(shutdown_node))
+        .route("/v1/admin/events", get(events_since))
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
         .fallback(static_file)
@@ -948,6 +953,19 @@ async fn shutdown_node(State(s): State<AppState>) -> StatusCode {
     tracing::info!("shutdown requested from the admin plane");
     let _ = s.inner.shutdown.send(true);
     StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    #[serde(default)]
+    since: u64,
+}
+
+/// Toast feed for the window shell: everything newer than `since`.
+/// The shell tracks the last id it showed (persisted next to the exe)
+/// so toasts survive neither restarts nor duplicates.
+async fn events_since(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Json<Vec<crate::events::Event>> {
+    Json(s.inner.events.lock().unwrap().since(q.since))
 }
 
 // ---- Browse proxy ----

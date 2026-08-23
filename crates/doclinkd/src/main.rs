@@ -1,6 +1,7 @@
 mod admin;
 mod auth;
 mod config;
+mod events;
 mod peer;
 mod proxy;
 mod scan;
@@ -148,7 +149,12 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     ));
 
-    tokio::spawn(store::run_expiry_sweeper(grants.clone(), shutdown_rx.clone()));
+    let events = events::shared();
+    tokio::spawn(store::run_expiry_sweeper(
+        grants.clone(),
+        events.clone(),
+        shutdown_rx.clone(),
+    ));
 
     // Catch-up poller for pair decisions that never reached us.
     tokio::spawn(store::run_pair_verifier(
@@ -173,7 +179,7 @@ async fn main() -> Result<()> {
     // Data plane: LAN-facing, TLS-only (v0.3), signature-authenticated,
     // read-only, scope-filtered. The certificate is derived from the node
     // identity, so peers pin sha256(SPKI) == fingerprint.
-    let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), contacts.clone(), pairing.clone());
+    let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), contacts.clone(), pairing.clone(), events.clone());
     let data_app = server::router(data_state);
     let data_addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
     let data_tcp = tokio::net::TcpListener::bind(data_addr).await?;
@@ -196,6 +202,7 @@ async fn main() -> Result<()> {
         cfg.subnet_scan,
         http,
         shutdown_tx,
+        events,
     );
     let admin_app = admin::router(admin_state);
     let admin_addr = std::net::SocketAddr::from(([127, 0, 0, 1], admin_port));

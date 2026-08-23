@@ -210,7 +210,14 @@ mod tests {
             version: "0.2".into(),
             fingerprint: identity.fingerprint(),
         };
-        let state = AppState::new(&cfg, node, grants, contacts, PairingState::default());
+        let state = AppState::new(
+            &cfg,
+            node,
+            grants,
+            contacts,
+            PairingState::default(),
+            crate::events::shared(),
+        );
         (dir, state, identity)
     }
 

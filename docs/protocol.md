@@ -172,6 +172,7 @@ Each grant carries `paths: []`:
 | `DELETE /v1/admin/myshare?path=` | Delete a file/folder from my share |
 | `POST /v1/admin/myshare/reveal` | Open the share folder in Explorer |
 | `POST /v1/admin/shutdown` | Graceful daemon stop (used by the window shell) |
+| `GET /v1/admin/events?since=<id>` | Notification feed (new pair requests, grants entering their final 24 h) — consumed by the shell's toast poller |
 | `GET /v1/admin/browse/{id}/list\|file` | Signed proxy to a contact's share |
 
 Every admin request must carry a local Host header
