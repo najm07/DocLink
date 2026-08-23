@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: &str = "0.2";
+pub const PROTOCOL_VERSION: &str = "0.3";
 pub const DISCOVERY_PORT: u16 = 37654;
 pub const DEFAULT_HTTP_PORT: u16 = 37655;
 pub const BEACON_MAGIC: &str = "DOCLINK_BEACON";
@@ -101,13 +101,13 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-/// Base URL for a discovered peer address. IPv6 literals must be
-/// bracketed or reqwest rejects the URL ("builder error").
+/// Base URL for a discovered peer address (v0.3: TLS-only data plane).
+/// IPv6 literals must be bracketed or reqwest rejects the URL.
 pub fn peer_base_url(addr: &str, port: u16) -> String {
     if addr.contains(':') {
-        format!("http://[{addr}]:{port}")
+        format!("https://[{addr}]:{port}")
     } else {
-        format!("http://{addr}:{port}")
+        format!("https://{addr}:{port}")
     }
 }
 

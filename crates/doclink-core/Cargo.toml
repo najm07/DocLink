@@ -16,3 +16,5 @@ tokio = { version = "1.40", features = ["sync", "time", "rt", "macros"] }
 mdns-sd = "0.13"
 urlencoding = "2"
 tracing = "0.1"
+rcgen = { workspace = true }
+x509-parser = { workspace = true }

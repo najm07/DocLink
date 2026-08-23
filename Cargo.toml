@@ -30,6 +30,17 @@ rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 urlencoding = "2"
 socket2 = "0.5"
+# v0.3 TLS: server side + deterministic self-signed cert from the
+# ed25519 identity; x509-parser extracts the SPKI key bits so clients
+# can pin sha256(SPKI) == peer fingerprint.
+tokio-rustls = "0.26"
+# ring only: the process also pulls ring via reqwest; enabling aws-lc-rs
+# too would make ServerConfig::builder() panic on the ambiguous provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = "0.13"
+x509-parser = { version = "0.16", features = ["verify"] }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server", "service", "http1", "http2", "tokio"] }
 # debug-embed: debug builds read webui/ from disk (live edits),
 # release builds compile it into the binary (single-file deployment).
 rust-embed = { version = "8", features = ["debug-embed"] }
