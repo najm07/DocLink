@@ -7,8 +7,9 @@ use crate::proxy::{self, ProxyError};
 use crate::server::{self, PairingState};
 use crate::share::{ShareError, ShareRoot};
 use crate::store::{Contact, ContactsFile, Grant, GrantsFile, SharedStore};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -35,9 +36,19 @@ pub(crate) struct AdminInner {
     pub contacts: SharedStore<ContactsFile>,
     pub pairing: PairingState,
     pub share: ShareRoot,
+    /// Port the admin plane is actually bound to (http_port + 1); used by
+    /// the Host/Origin guard below.
+    pub admin_port: u16,
+    /// Whether the active /24 scan fallback may run (config subnet_scan).
+    pub scan_enabled: bool,
+    /// Shared outbound client for all peer calls.
+    pub http: reqwest::Client,
+    /// Triggers the daemon-wide graceful shutdown.
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         node: NodeInfo,
         identity: NodeIdentity,
@@ -46,6 +57,10 @@ impl AppState {
         contacts: SharedStore<ContactsFile>,
         pairing: PairingState,
         share: ShareRoot,
+        admin_port: u16,
+        scan_enabled: bool,
+        http: reqwest::Client,
+        shutdown: tokio::sync::watch::Sender<bool>,
     ) -> Self {
         Self {
             inner: Arc::new(AdminInner {
@@ -56,6 +71,10 @@ impl AppState {
                 contacts,
                 pairing,
                 share,
+                admin_port,
+                scan_enabled,
+                http,
+                shutdown,
             }),
         }
     }
@@ -66,6 +85,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/info", get(info))
         .route("/v1/admin/peers", get(list_peers))
         .route("/v1/admin/contacts", get(list_contacts).post(add_contact))
+        .route("/v1/admin/contact-fingerprint", get(contact_fingerprint))
         .route("/v1/admin/contacts/{node_id}", delete(remove_contact))
         .route("/v1/admin/contacts/{node_id}/status", get(contact_status))
         .route("/v1/admin/requests", get(list_requests))
@@ -79,10 +99,60 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/myshare/list", get(myshare_list))
         .route("/v1/admin/myshare", delete(myshare_delete))
         .route("/v1/admin/myshare/reveal", post(myshare_reveal))
+        .route("/v1/admin/shutdown", post(shutdown_node))
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
         .fallback(static_file)
+        .layer(middleware::from_fn_with_state(state.clone(), local_only_guard))
         .with_state(state)
+}
+
+// ---- Local-origin guard (CSRF / DNS-rebinding defense) ----
+
+/// Is `authority` ("host" or "host:port") a legitimate address of this
+/// admin plane? The UI and the window shell always use 127.0.0.1 or
+/// localhost; anything else in a Host header is the classic DNS-rebinding
+/// shape (attacker domain resolving to 127.0.0.1) and must be refused.
+fn authority_allowed(authority: &str, admin_port: u16) -> bool {
+    let lowered = authority.trim().to_ascii_lowercase();
+    // Accept scheme-prefixed forms (Origin/Referer) as well as bare hosts.
+    let rest = lowered.strip_prefix("http://").unwrap_or(&lowered);
+    let rest = rest.strip_prefix("https://").unwrap_or(rest);
+    // Cut off any path/query that Referer may carry.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Split host from :port; an explicit port is required — this plane is
+    // never on a default port, and "bare host" requests are not ours.
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    // Trailing dot = FQDN spelling of localhost.
+    let host = host.strip_suffix('.').unwrap_or(host);
+    port == admin_port.to_string() && (host == "127.0.0.1" || host == "localhost")
+}
+
+async fn local_only_guard(State(s): State<AppState>, req: Request, next: Next) -> Response {
+    let port = s.inner.admin_port;
+    if let Some(host) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) {
+        if !authority_allowed(host, port) {
+            tracing::warn!(%host, "admin request with foreign Host header refused");
+            return not_found();
+        }
+    }
+    for h in [header::ORIGIN, header::REFERER] {
+        if let Some(v) = req.headers().get(&h).and_then(|v| v.to_str().ok()) {
+            if v.eq_ignore_ascii_case("null") || !authority_allowed(v, port) {
+                tracing::warn!(header = %h, %v, "admin request with foreign origin refused");
+                return not_found();
+            }
+        }
+    }
+    next.run(req).await
+}
+
+/// 404 rather than 403 — do not confirm to a probing page that a service
+/// lives on this port.
+fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, "not found").into_response()
 }
 
 // ---- Embedded web UI ----
@@ -107,11 +177,24 @@ async fn static_file(uri: axum::http::Uri) -> Response {
                 Some("png") => "image/png",
                 _ => "application/octet-stream",
             };
-            (
+            let mut response = (
                 [(header::CONTENT_TYPE, mime)],
                 content.data.into_owned(),
             )
-                .into_response()
+                .into_response();
+            // Defense-in-depth for the localhost UI (complements the
+            // Host/Origin guard): no third-party origins, no inline scripts.
+            response.headers_mut().insert(
+                header::CONTENT_SECURITY_POLICY,
+                header::HeaderValue::from_static(
+                    "default-src 'self'; img-src 'self' data:; style-src 'self'",
+                ),
+            );
+            response.headers_mut().insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                header::HeaderValue::from_static("nosniff"),
+            );
+            response
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
@@ -196,51 +279,131 @@ struct AddContactBody {
 /// resolve round-trip can take a few seconds on real networks.
 const DISCOVERY_WAIT: Duration = Duration::from_secs(6);
 
-/// Add a PC by DocLink ID: resolve via mDNS (instant on most networks),
-/// then fall back to active /24 probing if needed, verify identity,
-/// send a signed pair request, persist the contact. A manual host:port
-/// remains as the last-resort fallback for peers on a different subnet.
+/// Resolve a DocLink ID to `(base_url, mdns_fingerprint)`: wait for mDNS,
+/// then fall back to active /24 probing. A manual `host:port` bypasses
+/// discovery entirely (last resort for peers on another subnet).
+async fn resolve_peer_base(
+    s: &AppState,
+    node_id: &str,
+    manual_host: Option<&str>,
+) -> Option<(String, String)> {
+    if let Some(h) = manual_host.map(str::trim).filter(|h| !h.is_empty()) {
+        return Some((format!("http://{h}"), String::new()));
+    }
+    let deadline = Instant::now() + DISCOVERY_WAIT;
+    loop {
+        if let Some(p) = s
+            .inner
+            .peers
+            .snapshot()
+            .into_iter()
+            .find(|p| p.node_id == node_id)
+        {
+            return Some((doclink_core::protocol::peer_base_url(&p.addr, p.http_port), p.fingerprint));
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    if s.inner.scan_enabled {
+        crate::scan::find_node(node_id)
+            .await
+            .map(|base| (base, String::new()))
+    } else {
+        None
+    }
+}
+
+fn valid_node_id(id: &str) -> bool {
+    id.len() == 16 && id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Fetch a candidate pairing target's full identity WITHOUT sending a pair
+/// request. The Add PC dialog shows this 64-hex fingerprint for explicit
+/// out-of-band verification (the DocLink ID alone is only a 64-bit hash).
+async fn contact_fingerprint(
+    State(s): State<AppState>,
+    Query(q): Query<FingerprintQuery>,
+) -> Result<Json<NodeInfo>, (StatusCode, Json<ErrorResponse>)> {
+    let id = q.node_id.trim().to_lowercase();
+    if !valid_node_id(&id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "DocLink ID must be 16 hex characters",
+        ));
+    }
+    if id == s.inner.node.node_id {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "that's this PC's own DocLink ID",
+        ));
+    }
+    let Some((base, discovered_fp)) = resolve_peer_base(&s, &id, q.host.as_deref()).await else {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "peer not found on the LAN — check it is running DocLink, or set Host to its IP:port",
+        ));
+    };
+    let resp = s
+        .inner
+        .http
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("peer unreachable: {e}")))?;
+    let info: NodeInfo = resp
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("bad peer response: {e}")))?;
+    if info.node_id != id {
+        return Err(err(StatusCode::CONFLICT, "remote node_id mismatch"));
+    }
+    if !discovered_fp.is_empty() && discovered_fp != info.fingerprint {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "fingerprint mismatch between mDNS and /v1/info — possible spoofing",
+        ));
+    }
+    Ok(Json(info))
+}
+
+#[derive(Deserialize)]
+struct FingerprintQuery {
+    node_id: String,
+    #[serde(default)]
+    host: Option<String>,
+}
+
+/// Normalize a user-supplied DocLink ID (strip separators/spaces, lowercase).
+fn normalize_id(raw: &str) -> String {
+    raw.trim().to_lowercase().chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect()
+}
+
+/// Add a PC by DocLink ID: verify identity, send a signed pair request,
+/// persist the contact. The UI must have verified the remote fingerprint
+/// via /v1/admin/contact-fingerprint BEFORE calling this.
 async fn add_contact(
     State(s): State<AppState>,
     Json(body): Json<AddContactBody>,
 ) -> Result<Json<PairStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
-    if body.node_id == s.inner.node.node_id {
+    let id = normalize_id(&body.node_id);
+    if !valid_node_id(&id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "DocLink ID must be 16 hex characters",
+        ));
+    }
+    if id == s.inner.node.node_id {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "that's this PC's own DocLink ID",
         ));
     }
 
-    let target = if let Some(h) = body.host.clone() {
-        Some((format!("http://{h}"), String::new()))
-    } else {
-        let deadline = Instant::now() + DISCOVERY_WAIT;
-        let mut found = None;
-        loop {
-            if let Some(p) = s
-                .inner
-                .peers
-                .snapshot()
-                .into_iter()
-                .find(|p| p.node_id == body.node_id)
-            {
-                found = Some((format!("http://{}:{}", p.addr, p.http_port), p.fingerprint));
-                break;
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        if found.is_none() {
-            // mDNS didn't surface the peer: actively probe the local subnet.
-            if let Some(base) = crate::scan::find_node(&body.node_id).await {
-                found = Some((base, String::new()));
-            }
-        }
-        found
-    };
-    let Some((base, discovered_fp)) = target else {
+    let Some((base, _)) = resolve_peer_base(&s, &id, body.host.as_deref()).await else {
         return Err(err(
             StatusCode::NOT_FOUND,
             "peer not found on the LAN — check it is running DocLink and that both PCs are on the same subnet, or set Host (optional) to its IP:port (e.g. 192.168.1.20:37655)",
@@ -248,20 +411,18 @@ async fn add_contact(
     };
 
     // Verify the target's identity before trusting it with our pubkey.
-    let remote_info: NodeInfo = reqwest::get(format!("{base}/v1/info"))
+    let remote_info: NodeInfo = s
+        .inner
+        .http
+        .get(format!("{base}/v1/info"))
+        .send()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("peer unreachable: {e}")))?
         .json()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("bad peer response: {e}")))?;
-    if remote_info.node_id != body.node_id {
+    if remote_info.node_id != id {
         return Err(err(StatusCode::CONFLICT, "remote node_id mismatch"));
-    }
-    if !discovered_fp.is_empty() && discovered_fp != remote_info.fingerprint {
-        return Err(err(
-            StatusCode::CONFLICT,
-            "fingerprint mismatch between mDNS and /v1/info — possible spoofing",
-        ));
     }
 
     // Build and sign the pair request.
@@ -283,7 +444,9 @@ async fn add_contact(
         ..req
     };
 
-    let resp = reqwest::Client::new()
+    let resp = s
+        .inner
+        .http
         .post(format!("{base}/v1/pair/request"))
         .json(&req)
         .send()
@@ -301,7 +464,7 @@ async fn add_contact(
         PairStatus::Unknown => "unknown",
     };
     let contact = Contact {
-        node_id: body.node_id.clone(),
+        node_id: id,
         alias: body.alias.clone(),
         fingerprint: remote_info.fingerprint.clone(),
         host: body.host.clone(),
@@ -350,13 +513,24 @@ async fn contact_status(
         // Try to find the peer via mDNS registry.
         let peers = s.inner.peers.snapshot();
         if let Some(p) = peers.iter().find(|p| p.node_id == node_id) {
-            format!("http://{}:{}", p.addr, p.http_port)
+            doclink_core::protocol::peer_base_url(&p.addr, p.http_port)
         } else {
             return Err(err(StatusCode::NOT_FOUND, "peer not currently reachable"));
         }
     };
-    let url = format!("{base}/v1/pair/status?node_id={}", s.inner.node.node_id);
-    let status: PairStatusResponse = reqwest::get(&url)
+    // Signed poll — the peer's /v1/pair/status requires proof of identity.
+    let path_q = format!(
+        "/v1/pair/status?node_id={}",
+        urlencoding::encode(&s.inner.node.node_id)
+    );
+    let url = format!("{base}{path_q}");
+    let mut req = s.inner.http.get(&url);
+    for (k, v) in s.inner.identity.auth_headers("GET", &path_q) {
+        req = req.header(k, v);
+    }
+    let status: PairStatusResponse = req
+        .timeout(Duration::from_secs(4))
+        .send()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("peer unreachable: {e}")))?
         .json()
@@ -375,7 +549,7 @@ async fn list_requests(State(s): State<AppState>) -> Json<Vec<PairRequest>> {
             .lock()
             .unwrap()
             .values()
-            .cloned()
+            .map(|e| e.request.clone())
             .collect(),
     )
 }
@@ -423,7 +597,7 @@ async fn push_decision_to_requester(
     let base = {
         let peers = s.inner.peers.snapshot();
         if let Some(p) = peers.iter().find(|p| p.node_id == requester_node_id) {
-            format!("http://{}:{}", p.addr, p.http_port)
+            doclink_core::protocol::peer_base_url(&p.addr, p.http_port)
         } else {
             let host = s
                 .inner
@@ -438,8 +612,13 @@ async fn push_decision_to_requester(
             if let Some(h) = host {
                 format!("http://{h}")
             } else {
-                // Fallback: active probe (same as Add PC).
-                if let Some(b) = crate::scan::find_node(requester_node_id).await {
+                // Fallback: active probe (same as Add PC), when allowed.
+                let found = if s.inner.scan_enabled {
+                    crate::scan::find_node(requester_node_id).await
+                } else {
+                    None
+                };
+                if let Some(b) = found {
                     b
                 } else {
                     return Err(err(
@@ -467,10 +646,10 @@ async fn push_decision_to_requester(
     );
     let decision = PairDecision { signature, ..decision };
 
-    // POST to the requester's data plane.
-    let client = reqwest::Client::new();
+    // POST to the requester's data plane (fire-and-forget: the catch-up
+    // poller covers the case where this never lands).
     let url = format!("{base}/v1/pair/decision");
-    let _ = client.post(&url).json(&decision).send().await;
+    let _ = s.inner.http.post(&url).json(&decision).send().await;
     Ok(())
 }
 
@@ -581,7 +760,7 @@ async fn myshare_list(
     State(s): State<AppState>,
     Query(q): Query<BrowseQuery>,
 ) -> Result<Json<ListResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let entries = s.inner.share.list(&q.path).map_err(share_err)?;
+    let entries = s.inner.share.list(&q.path).await.map_err(share_err)?;
     Ok(Json(ListResponse {
         path: q.path,
         entries,
@@ -592,7 +771,7 @@ async fn myshare_delete(
     State(s): State<AppState>,
     Query(q): Query<BrowseQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    s.inner.share.delete(&q.path).map_err(share_err)?;
+    s.inner.share.delete(&q.path).await.map_err(share_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -605,6 +784,14 @@ async fn myshare_reveal(State(s): State<AppState>) -> StatusCode {
             .arg(s.inner.share.root())
             .spawn();
     }
+    StatusCode::NO_CONTENT
+}
+
+/// Graceful stop, invoked by the window shell's Quit action. Protected by
+/// the same local-origin guard as every other admin route.
+async fn shutdown_node(State(s): State<AppState>) -> StatusCode {
+    tracing::info!("shutdown requested from the admin plane");
+    let _ = s.inner.shutdown.send(true);
     StatusCode::NO_CONTENT
 }
 
@@ -621,7 +808,51 @@ async fn browse_list(
 async fn browse_file(
     State(s): State<AppState>,
     Path(node_id): Path<String>,
+    headers: axum::http::HeaderMap,
     Query(q): Query<BrowseQuery>,
 ) -> Result<Response, ProxyError> {
-    proxy::file(&s, &node_id, &q.path).await
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    proxy::file(&s, &node_id, &q.path, range.as_deref()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authority_allowed;
+
+    #[test]
+    fn accepts_local_hosts_on_admin_port() {
+        assert!(authority_allowed("127.0.0.1:37656", 37656));
+        assert!(authority_allowed("localhost:37656", 37656));
+        assert!(authority_allowed("LOCALHOST:37656", 37656));
+        assert!(authority_allowed("127.0.0.1:37656", 37656));
+        // Scheme-prefixed Origin/Referer forms.
+        assert!(authority_allowed("http://127.0.0.1:37656", 37656));
+        assert!(authority_allowed("http://localhost:37656/some/path?x=1", 37656));
+        // Trailing-dot FQDN spelling.
+        assert!(authority_allowed("localhost.:37656", 37656));
+        // Whitespace padding from header parsing quirks.
+        assert!(authority_allowed(" localhost:37656 ", 37656));
+    }
+
+    #[test]
+    fn rejects_everything_else() {
+        // DNS rebinding: attacker domain resolving to 127.0.0.1.
+        assert!(!authority_allowed("evil.example.com:37656", 37656));
+        assert!(!authority_allowed("http://evil.example.com", 37656));
+        // Right host, wrong port (e.g. data plane or another service).
+        assert!(!authority_allowed("127.0.0.1:37655", 37656));
+        assert!(!authority_allowed("localhost:9999", 37656));
+        // No port / garbage.
+        assert!(!authority_allowed("127.0.0.1", 37656));
+        assert!(!authority_allowed("", 37656));
+        // Opaque origin ("null") is checked separately by the guard but
+        // must never pass through here either.
+        assert!(!authority_allowed("null", 37656));
+        // Lookalike suffix tricks.
+        assert!(!authority_allowed("127.0.0.1.evil.com:37656", 37656));
+        assert!(!authority_allowed("evillhost:37656", 37656));
+    }
 }

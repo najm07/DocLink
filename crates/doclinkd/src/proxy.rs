@@ -7,7 +7,6 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use doclink_core::identity::NodeIdentity;
 use doclink_core::protocol::ErrorResponse;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 struct PeerTarget {
     base: String,
@@ -45,7 +44,7 @@ fn peer_lookup(s: &AppState, node_id: &str) -> Result<PeerTarget, ProxyError> {
         .find(|p| p.node_id == node_id)
     {
         return Ok(PeerTarget {
-            base: format!("http://{}:{}", peer.addr, peer.http_port),
+            base: doclink_core::protocol::peer_base_url(&peer.addr, peer.http_port),
         });
     }
     if let Some(host) = contacts
@@ -63,26 +62,11 @@ fn peer_lookup(s: &AppState, node_id: &str) -> Result<PeerTarget, ProxyError> {
 
 /// The four authentication headers defined in docs/protocol.md §4.
 fn sign_request(identity: &NodeIdentity, method: &str, path_q: &str) -> Vec<(String, String)> {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-        .to_string();
-    let canonical = format!("{method}\n{path_q}\n{ts}\n");
-    let sig = identity.sign(canonical.as_bytes());
-    vec![
-        ("x-doclink-node".into(), identity.node_id()),
-        (
-            "x-doclink-pub".into(),
-            hex::encode(identity.verifying_key().as_bytes()),
-        ),
-        ("x-doclink-ts".into(), ts),
-        ("x-doclink-sig".into(), hex::encode(sig.to_bytes())),
-    ]
+    identity.auth_headers(method, path_q)
 }
 
 fn signed_get(s: &AppState, base: &str, path_q: &str) -> reqwest::RequestBuilder {
-    let req = reqwest::Client::new().get(format!("{base}{path_q}"));
+    let req = s.inner.http.get(format!("{base}{path_q}"));
     sign_request(&s.inner.identity, "GET", path_q)
         .into_iter()
         .fold(req, |r, (k, v)| r.header(k, v))
@@ -111,10 +95,19 @@ pub async fn list(
         .map_err(|e| ProxyError::Upstream(format!("invalid peer response: {e}")))
 }
 
-pub async fn file(s: &AppState, node_id: &str, path: &str) -> Result<Response, ProxyError> {
+pub async fn file(
+    s: &AppState,
+    node_id: &str,
+    path: &str,
+    range: Option<&str>,
+) -> Result<Response, ProxyError> {
     let target = peer_lookup(s, node_id)?;
     let path_q = format!("/v1/file?path={}", urlencoding::encode(path));
-    let resp = signed_get(s, &target.base, &path_q)
+    let mut req = signed_get(s, &target.base, &path_q);
+    if let Some(r) = range {
+        req = req.header(header::RANGE, r);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| ProxyError::Upstream(e.to_string()))?;
@@ -130,23 +123,47 @@ pub async fn file(s: &AppState, node_id: &str, path: &str) -> Result<Response, P
         .get(header::CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    let content_range = resp
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let content_length = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
     if !status.is_success() {
-        let msg = String::from_utf8_lossy(&bytes).to_string();
+        let msg = resp.text().await.unwrap_or_default();
         return Err(ProxyError::Upstream(format!("peer returned {status}: {msg}")));
     }
+    // Stream the body straight through — never buffer a whole file here.
     let name = path.rsplit('/').next().unwrap_or("download");
     let mut out = HeaderMap::new();
-    out.insert(header::CONTENT_TYPE, ctype.parse().unwrap());
-    out.insert(
-        header::CONTENT_DISPOSITION,
-        cdisp
-            .unwrap_or_else(|| format!("attachment; filename=\"{name}\""))
-            .parse()
-            .unwrap(),
-    );
-    Ok((out, bytes.to_vec()).into_response())
+    if let Ok(v) = ctype.parse() {
+        out.insert(header::CONTENT_TYPE, v);
+    }
+    let cd = cdisp.unwrap_or_else(|| format!("attachment; filename=\"{name}\""));
+    if let Ok(v) = cd.parse() {
+        out.insert(header::CONTENT_DISPOSITION, v);
+    }
+    if let Some(len) = content_length {
+        if let Ok(v) = len.to_string().parse() {
+            out.insert(header::CONTENT_LENGTH, v);
+        }
+    }
+    let status_out = if content_range.is_some() || status == StatusCode::PARTIAL_CONTENT {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    if let Some(cr) = content_range {
+        if let Ok(v) = cr.parse() {
+            out.insert(header::CONTENT_RANGE, v);
+        }
+    }
+    let body = axum::body::Body::from_stream(resp.bytes_stream());
+    let mut response = (out, body).into_response();
+    *response.status_mut() = status_out;
+    Ok(response)
 }

@@ -31,20 +31,25 @@ struct Cli {
 /// timeout) and refresh its liveness on success. Peers that stop answering
 /// are left alone; the registry's snapshot pruning removes them after
 /// PEER_TTL_SECS.
-async fn run_peer_keepalive(registry: PeerRegistry, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .expect("reqwest client");
+async fn run_peer_keepalive(
+    http: reqwest::Client,
+    registry: PeerRegistry,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
             _ = tick.tick() => {
                 for peer in registry.snapshot() {
-                    let url = format!("http://{}:{}/v1/info", peer.addr, peer.http_port);
-                    let ok = client
+                    let url = format!(
+                        "{}{}",
+                        doclink_core::protocol::peer_base_url(&peer.addr, peer.http_port),
+                        "/v1/info"
+                    );
+                    let ok = http
                         .get(&url)
+                        .timeout(std::time::Duration::from_secs(2))
                         .send()
                         .await
                         .map(|r| r.status().is_success())
@@ -56,6 +61,11 @@ async fn run_peer_keepalive(registry: PeerRegistry, mut shutdown: tokio::sync::w
             }
         }
     }
+}
+
+/// Resolves when a graceful stop has been requested (admin endpoint or Ctrl-C).
+async fn wait_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    let _ = rx.changed().await;
 }
 
 #[tokio::main]
@@ -87,8 +97,24 @@ async fn main() -> Result<()> {
     let admin_share = share::ShareRoot::new(&cfg.share_root).context("opening share root")?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    // Ctrl-C takes the same graceful path as the admin stop endpoint.
+    tokio::spawn({
+        let tx = shutdown_tx.clone();
+        async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                info!("Ctrl-C — shutting down");
+                let _ = tx.send(true);
+            }
+        }
+    });
 
     let http_port = cfg.http_port();
+
+    // One shared HTTP client for all outbound peer calls. No global
+    // timeout — file downloads are long — call sites set their own.
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()?;
 
     // mDNS advertiser: register our service so other PCs can resolve our ID.
     if cfg.advertise() {
@@ -119,9 +145,10 @@ async fn main() -> Result<()> {
 
     // Catch-up poller for pair decisions that never reached us.
     tokio::spawn(store::run_pair_verifier(
+        http.clone(),
         contacts.clone(),
         registry.clone(),
-        node.node_id.clone(),
+        identity.clone(),
         shutdown_rx.clone(),
     ));
 
@@ -130,7 +157,11 @@ async fn main() -> Result<()> {
     // TTLs), so without this every peer would age out of the registry and
     // show "offline" after PEER_TTL_SECS even while running. We probe the
     // data plane directly instead — that is what "online" actually means.
-    tokio::spawn(run_peer_keepalive(registry.clone(), shutdown_rx.clone()));
+    tokio::spawn(run_peer_keepalive(
+        http.clone(),
+        registry.clone(),
+        shutdown_rx.clone(),
+    ));
 
     // Data plane: LAN-facing, signature-authenticated, read-only, scope-filtered.
     let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), contacts.clone(), pairing.clone());
@@ -140,6 +171,7 @@ async fn main() -> Result<()> {
     info!(%data_addr, "share API (peer-facing) listening");
 
     // Admin plane: localhost only — window UI, contacts, approvals, proxy.
+    let admin_port = http_port + 1;
     let admin_state = admin::AppState::new(
         node,
         identity,
@@ -148,20 +180,26 @@ async fn main() -> Result<()> {
         contacts,
         pairing,
         admin_share,
+        admin_port,
+        cfg.subnet_scan,
+        http,
+        shutdown_tx,
     );
     let admin_app = admin::router(admin_state);
-    let admin_addr = std::net::SocketAddr::from(([127, 0, 0, 1], http_port + 1));
+    let admin_addr = std::net::SocketAddr::from(([127, 0, 0, 1], admin_port));
     let admin_tcp = tokio::net::TcpListener::bind(admin_addr).await?;
     info!(%admin_addr, "web UI listening — open http://{}", admin_addr);
 
-    // TODO(M3): graceful shutdown on Ctrl-C / service stop.
+    // Publish the actual bound port so doclink-win (and other local
+    // tools) can find this instance even with a --port override.
+    let _ = std::fs::write("doclink-admin.port", admin_port.to_string());
+
     let data = axum::serve(
         data_tcp,
         data_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    );
-    let admin = axum::serve(admin_tcp, admin_app);
+    )
+    .with_graceful_shutdown(wait_shutdown(shutdown_rx.clone()));
+    let admin = axum::serve(admin_tcp, admin_app).with_graceful_shutdown(wait_shutdown(shutdown_rx));
     tokio::try_join!(data, admin)?;
-
-    shutdown_tx.send(true).ok();
     Ok(())
 }

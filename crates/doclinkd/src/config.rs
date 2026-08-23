@@ -23,6 +23,11 @@ pub struct Config {
     pub share_root: String,
     #[serde(default = "default_true")]
     pub advertise: bool,
+    /// Active /24 probing fallback when mDNS misses. Off avoids the
+    /// network noise of probing 254 hosts (some corporate IDS setups
+    /// flag it); discovery and manual host:port still work.
+    #[serde(default = "default_true")]
+    pub subnet_scan: bool,
 }
 
 fn default_node_name() -> String {
@@ -50,6 +55,7 @@ impl Default for Config {
             http_port: default_http_port(),
             share_root: default_share_root(),
             advertise: default_true(),
+            subnet_scan: default_true(),
         }
     }
 }

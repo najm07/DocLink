@@ -21,3 +21,4 @@ hex = { workspace = true }
 urlencoding = { workspace = true }
 reqwest = { workspace = true }
 rust-embed = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }

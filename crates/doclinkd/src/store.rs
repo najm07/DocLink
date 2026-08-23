@@ -39,7 +39,7 @@ impl GrantsFile {
     /// Drop expired grants; returns true if anything changed.
     pub fn prune_expired(&mut self, now: u64) -> bool {
         let before = self.grants.len();
-        self.grants.retain(|g| g.expires_unix.map_or(true, |e| e > now));
+        self.grants.retain(|g| g.expires_unix.is_none_or(|e| e > now));
         self.grants.len() != before
     }
 }
@@ -117,10 +117,18 @@ impl<T: Storable> Store<T> {
         &mut self.data
     }
 
-    /// Atomic-ish persist: write a temp file, then rename over the original.
+    /// Atomic-ish persist: write a temp file, fsync it, then rename over
+    /// the original. The fsync matters — without it a crash right after
+    /// the rename can leave the target with zero-length content.
     pub fn save(&self) -> Result<()> {
+        use std::io::Write;
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&self.data)?)?;
+        let payload = serde_json::to_string_pretty(&self.data)?;
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(payload.as_bytes())?;
+            f.sync_all()?;
+        }
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -163,16 +171,18 @@ pub async fn run_expiry_sweeper(
 /// Re-check pending contacts against the grantor's `/v1/pair/status`.
 /// The grantor pushes the decision, but if that push is lost (requester
 /// offline at approval time, or mDNS miss), this polling catches up and
-/// flips the contact to "approved"/"denied".
+/// flips the contact to "approved"/"denied". Polls are signed — the
+/// grantor's `/v1/pair/status` requires proof of the requester's identity.
 pub async fn run_pair_verifier(
+    http: reqwest::Client,
     contacts: SharedStore<ContactsFile>,
     peers: doclink_core::discovery::PeerRegistry,
-    my_id: String,
+    identity: doclink_core::identity::NodeIdentity,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     use doclink_core::protocol::{PairStatus, PairStatusResponse};
 
-    let client = reqwest::Client::new();
+    let my_id = identity.node_id();
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         tokio::select! {
@@ -186,11 +196,17 @@ pub async fn run_pair_verifier(
                     let Some(p) = peers.snapshot().into_iter().find(|p| p.node_id == node_id) else {
                         continue;
                     };
+                    let path_q = format!("/v1/pair/status?node_id={}", urlencoding::encode(&my_id));
                     let url = format!(
-                        "http://{}:{}/v1/pair/status?node_id={}",
-                        p.addr, p.http_port, my_id
+                        "{}{}",
+                        doclink_core::protocol::peer_base_url(&p.addr, p.http_port),
+                        path_q
                     );
-                    let Ok(resp) = client.get(&url).timeout(Duration::from_secs(2)).send().await else {
+                    let mut req = http.get(&url);
+                    for (k, v) in identity.auth_headers("GET", &path_q) {
+                        req = req.header(k, v);
+                    }
+                    let Ok(resp) = req.timeout(Duration::from_secs(2)).send().await else {
                         continue;
                     };
                     let Ok(status) = resp.json::<PairStatusResponse>().await else {
@@ -216,5 +232,106 @@ pub async fn run_pair_verifier(
             }
             _ = shutdown.changed() => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_path(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT_ID: AtomicU32 = AtomicU32::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!(
+            "doclink-store-test-{}-{}-{}.json",
+            tag,
+            std::process::id(),
+            id
+        ))
+    }
+
+    fn grant(fp: &str, expires_unix: Option<u64>) -> Grant {
+        Grant {
+            fingerprint: fp.into(),
+            node_id: format!("node-{fp}"),
+            name: "n".into(),
+            granted_unix: 1000,
+            expires_unix,
+            paths: vec![],
+        }
+    }
+
+    #[test]
+    fn upsert_replaces_by_fingerprint() {
+        let mut f = GrantsFile::default();
+        f.upsert(grant("aa", None));
+        f.upsert(grant("bb", None));
+        assert_eq!(f.grants.len(), 2);
+        f.upsert(grant("aa", Some(5000)));
+        assert_eq!(f.grants.len(), 2);
+        let aa = f.grants.iter().find(|g| g.fingerprint == "aa").unwrap();
+        assert_eq!(aa.expires_unix, Some(5000));
+    }
+
+    #[test]
+    fn prune_expired_keeps_open_and_future_grants() {
+        let mut f = GrantsFile::default();
+        f.upsert(grant("open", None));
+        f.upsert(grant("future", Some(2000)));
+        f.upsert(grant("past", Some(999)));
+        assert!(f.prune_expired(1500));
+        let fps: Vec<&str> = f.grants.iter().map(|g| g.fingerprint.as_str()).collect();
+        assert_eq!(fps, vec!["open", "future"]);
+        assert!(!f.prune_expired(1500)); // idempotent
+    }
+
+    #[test]
+    fn contacts_upsert_and_remove_by_node_id() {
+        let mut c = ContactsFile::default();
+        c.upsert(Contact {
+            node_id: "n1".into(),
+            alias: "A".into(),
+            fingerprint: "f1".into(),
+            host: None,
+            status: "pending".into(),
+        });
+        c.upsert(Contact {
+            node_id: "n1".into(),
+            alias: "A2".into(),
+            fingerprint: "f1".into(),
+            host: None,
+            status: "approved".into(),
+        });
+        assert_eq!(c.contacts.len(), 1);
+        assert_eq!(c.contacts[0].alias, "A2");
+        assert!(c.remove("n1"));
+        assert!(!c.remove("n1"));
+    }
+
+    #[test]
+    fn save_then_reload_roundtrips() {
+        let path = tmp_path("roundtrip");
+        {
+            let mut store = Store::<GrantsFile>::open(&path).unwrap();
+            store.data_mut().upsert(grant("cc", Some(42)));
+            store.save().unwrap();
+        }
+        let reloaded = Store::<GrantsFile>::open(&path).unwrap();
+        assert_eq!(reloaded.read().grants.len(), 1);
+        assert_eq!(reloaded.read().grants[0].expires_unix, Some(42));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_writes_tmp_then_renames() {
+        let path = tmp_path("rename");
+        let store = Store::<GrantsFile>::open(&path).unwrap();
+        store.save().unwrap();
+        // After a successful save no .tmp residue remains next to the target.
+        let tmp = path.with_extension("tmp");
+        assert!(!tmp.exists());
+        assert!(path.exists());
+        let _ = std::fs::remove_file(&path);
     }
 }

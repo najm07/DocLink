@@ -43,7 +43,11 @@ impl ShareRoot {
     /// guaranteed to live under the share root.
     pub fn resolve(&self, rel: &str) -> Result<PathBuf, ShareError> {
         let rel_path = Path::new(rel);
-        let suspicious = rel_path.is_absolute()
+        // `:` never appears in a legitimate relative component on Windows:
+        // it is either a drive/prefix or an NTFS alternate data stream
+        // selector (`file.txt:hidden`), so reject it outright.
+        let suspicious = rel.contains(':')
+            || rel_path.is_absolute()
             || rel_path.components().any(|c| {
                 matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))
             });
@@ -62,12 +66,12 @@ impl ShareRoot {
     }
 
     /// List one directory inside the share ("" = root).
-    pub fn list(&self, rel: &str) -> Result<Vec<DirEntry>, ShareError> {
+    pub async fn list(&self, rel: &str) -> Result<Vec<DirEntry>, ShareError> {
         let dir = self.resolve(rel)?;
+        let mut rd = tokio::fs::read_dir(dir).await?;
         let mut entries = Vec::new();
-        for item in std::fs::read_dir(dir)? {
-            let item = item?;
-            let meta = item.metadata()?;
+        while let Some(item) = rd.next_entry().await? {
+            let meta = item.metadata().await?;
             let name = item.file_name().to_string_lossy().into_owned();
             let path = if rel.is_empty() {
                 name.clone()
@@ -97,7 +101,7 @@ impl ShareRoot {
 
     /// Owner-side management: delete a file or folder from the share.
     /// The share root itself cannot be deleted.
-    pub fn delete(&self, rel: &str) -> Result<(), ShareError> {
+    pub async fn delete(&self, rel: &str) -> Result<(), ShareError> {
         if rel.is_empty() {
             return Err(ShareError::IsRoot);
         }
@@ -105,12 +109,118 @@ impl ShareRoot {
         if path == self.root {
             return Err(ShareError::IsRoot);
         }
-        let meta = std::fs::metadata(&path)?;
+        let meta = tokio::fs::metadata(&path).await?;
         if meta.is_dir() {
-            std::fs::remove_dir_all(&path)?;
+            tokio::fs::remove_dir_all(&path).await?;
         } else {
-            std::fs::remove_file(&path)?;
+            tokio::fs::remove_file(&path).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static NEXT_ID: AtomicU32 = AtomicU32::new(0);
+
+    /// Fresh temp share root with `a/b.txt` and an empty dir `c/`.
+    fn test_root() -> (ShareRoot, PathBuf) {
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("doclink-share-test-{}-{}", std::process::id(), id));
+        let root = ShareRoot::new(&dir).expect("share root");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::write(dir.join("a").join("b.txt"), b"hello").unwrap();
+        std::fs::create_dir_all(dir.join("c")).unwrap();
+        (root, dir)
+    }
+
+    fn cleanup(dir: &Path) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_accepts_normal_paths() {
+        let (root, dir) = test_root();
+        assert!(root.resolve("a/b.txt").is_ok());
+        assert!(root.resolve("a").is_ok());
+        assert!(root.resolve("").is_ok());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_rejects_traversal() {
+        let (root, dir) = test_root();
+        for bad in ["../x", "a/../../x", "..", "a/../.."] {
+            assert!(matches!(root.resolve(bad), Err(ShareError::OutsideRoot)), "{bad}");
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_rejects_absolute_and_prefixes() {
+        let (root, dir) = test_root();
+        for bad in ["C:/Windows", r"C:\Windows", r"\\?\C:\Windows", r"\\server\share", "/etc/passwd"] {
+            assert!(
+                matches!(root.resolve(bad), Err(ShareError::OutsideRoot) | Err(ShareError::NotFound(_))),
+                "{bad}"
+            );
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_rejects_alternate_data_stream_selectors() {
+        let (root, dir) = test_root();
+        for bad in ["a/b.txt:hidden", ":ads", "a:stream", "a/b.txt:Zone.Identifier:$DATA"] {
+            assert!(matches!(root.resolve(bad), Err(ShareError::OutsideRoot)), "{bad}");
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_rejects_symlink_escaping_root() {
+        let (root, dir) = test_root();
+        let outside = dir.parent().unwrap().join(format!("doclink-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = dir.join("leak");
+        let created = std::os::windows::fs::symlink_dir(&outside, &link).is_ok();
+        if created {
+            // The canonicalized target lives outside the root -> must be rejected.
+            assert!(matches!(root.resolve("leak"), Err(ShareError::OutsideRoot)));
+        } // symlink creation needs developer mode/admin; skip silently otherwise
+        let _ = std::fs::remove_dir_all(&outside);
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_share_root() {
+        let (root, dir) = test_root();
+        assert!(matches!(root.delete("").await, Err(ShareError::IsRoot)));
+        assert!(matches!(root.delete(".").await, Err(ShareError::IsRoot)));
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn list_sorts_dirs_first_and_reports_metadata() {
+        let (root, dir) = test_root();
+        let entries = root.list("").await.unwrap();
+        assert_eq!(entries.len(), 2); // a/ and c/
+        assert_eq!(entries[0].kind, EntryKind::Dir);
+        assert_eq!(entries[0].path, "a");
+        let inner = root.list("a").await.unwrap();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].name, "b.txt");
+        assert_eq!(inner[0].size, 5);
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn list_rejects_traversal() {
+        let (root, dir) = test_root();
+        assert!(matches!(root.list("../").await, Err(ShareError::OutsideRoot)));
+        cleanup(&dir);
     }
 }

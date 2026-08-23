@@ -3,19 +3,10 @@
 //! http://<ip>:37655/v1/info across the local /24 until the target
 //! node_id answers.
 
+use doclink_core::discovery::primary_ipv4;
 use doclink_core::protocol::{NodeInfo, DEFAULT_HTTP_PORT};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::time::Duration;
-
-/// Primary interface IPv4 via the routing table (sends no packets).
-fn primary_ipv4() -> Option<Ipv4Addr> {
-    let s = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    s.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
-    match s.local_addr().ok()?.ip() {
-        IpAddr::V4(v4) if !v4.is_loopback() => Some(v4),
-        _ => None,
-    }
-}
 
 /// Probe the local /24 for a node with the given DocLink ID.
 /// Returns its base URL ("http://<ip>:<port>") when found.
