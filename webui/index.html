@@ -51,21 +51,37 @@
           <button type="button" id="btn-add" class="tool" title="Add PC">+</button>
         </div>
         <form id="add-form" class="add-form" hidden>
-          <input id="add-id" placeholder="DocLink ID" autocomplete="off" spellcheck="false" required />
-          <input id="add-alias" placeholder="Name (e.g. PC-Compta)" required />
-          <div class="add-row">
-            <select id="add-duration">
-              <option value="86400">1 day</option>
-              <option value="604800" selected>7 days</option>
-              <option value="2592000">30 days</option>
-              <option value="0">Until revoked</option>
-            </select>
-            <button type="submit">Add</button>
+          <div id="add-fields">
+            <input id="add-id" placeholder="DocLink ID" autocomplete="off" spellcheck="false" required />
+            <input id="add-alias" placeholder="Name (e.g. PC-Compta)" required />
+            <div class="add-row">
+              <select id="add-duration">
+                <option value="86400">1 day</option>
+                <option value="604800" selected>7 days</option>
+                <option value="2592000">30 days</option>
+                <option value="0">Until revoked</option>
+              </select>
+              <button type="submit">Next</button>
+            </div>
+            <details>
+              <summary>Advanced</summary>
+              <input id="add-host" placeholder="host:port override" />
+            </details>
           </div>
-          <details>
-            <summary>Advanced</summary>
-            <input id="add-host" placeholder="host:port override" />
-          </details>
+          <div id="add-verify" hidden>
+            <p class="dim">Verify this is really the other PC — its full fingerprint:</p>
+            <code id="add-remote-fp" class="fp"></code>
+            <p class="dim">This PC shows this fingerprint:</p>
+            <code id="add-self-fp" class="fp"></code>
+            <label class="fp-confirm">
+              <input type="checkbox" id="add-fp-ok" />
+              The other PC displays exactly the first fingerprint
+            </label>
+            <div class="add-row">
+              <button type="button" id="add-back">Back</button>
+              <button type="submit" id="add-confirm" disabled>Add PC</button>
+            </div>
+          </div>
           <p id="add-status"></p>
           <div id="add-discovered"></div>
         </form>

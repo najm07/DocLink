@@ -1,4 +1,4 @@
-const state = { selected: "mine", path: "", view: "pcs", contacts: [], nodeName: "" };
+const state = { selected: "mine", path: "", view: "pcs", contacts: [], nodeName: "", selfFp: "" };
 
 function native(cmd) {
   try {
@@ -97,6 +97,7 @@ function updateChrome() {
 async function loadInfo() {
   const info = await api("/v1/admin/info");
   state.nodeName = info.name || "";
+  state.selfFp = info.fingerprint || "";
   const btn = document.getElementById("this-node");
   const val = document.getElementById("this-node-id");
   val.textContent = groupId(info.node_id);
@@ -395,7 +396,79 @@ async function openAccessEditor(g) {
   };
 }
 
-// ---- add contact ----
+// ---- add contact (two-stage: resolve+verify fingerprint, then pair) ----
+
+let pendingAdd = null;
+
+function resetAddStage() {
+  pendingAdd = null;
+  document.getElementById("add-fields").hidden = false;
+  document.getElementById("add-verify").hidden = true;
+}
+
+async function addContact(ev) {
+  ev.preventDefault();
+  const status = document.getElementById("add-status");
+
+  // Stage 1 — resolve the ID and show the remote fingerprint for
+  // out-of-band verification. No pair request leaves this machine yet.
+  if (!pendingAdd) {
+    const id = document.getElementById("add-id").value.trim().toLowerCase().replace(/[^0-9a-f]/g, "");
+    const alias = document.getElementById("add-alias").value.trim();
+    const host = document.getElementById("add-host").value.trim();
+    const dur = parseInt(document.getElementById("add-duration").value, 10);
+    if (id.length !== 16) {
+      status.textContent = "ID is 16 hex characters.";
+      return;
+    }
+    status.textContent = "Looking on the LAN…";
+    try {
+      const q = "/v1/admin/contact-fingerprint?node_id=" + encodeURIComponent(id) +
+        (host ? "&host=" + encodeURIComponent(host) : "");
+      const info = await api(q);
+      pendingAdd = { id, alias, host, dur };
+      document.getElementById("add-remote-fp").textContent = groupId(info.fingerprint);
+      document.getElementById("add-self-fp").textContent = groupId(state.selfFp);
+      document.getElementById("add-fields").hidden = true;
+      document.getElementById("add-verify").hidden = false;
+      const cb = document.getElementById("add-fp-ok");
+      cb.checked = false;
+      document.getElementById("add-confirm").disabled = true;
+      status.textContent = "";
+    } catch (e) {
+      status.textContent = e.message;
+    }
+    return;
+  }
+
+  // Stage 2 — the user confirmed the fingerprint; send the pair request.
+  status.textContent = "Sending pair request…";
+  try {
+    const r = await api("/v1/admin/contacts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        node_id: pendingAdd.id,
+        alias: pendingAdd.alias,
+        host: pendingAdd.host || null,
+        duration_secs: pendingAdd.dur,
+      }),
+    });
+    status.textContent =
+      r.status === "approved" ? "Approved. You can browse it now."
+      : r.status === "pending" ? "Request sent. Waiting for approval."
+      : "Denied.";
+    if (r.status === "approved" || r.status === "pending") {
+      resetAddStage();
+      document.getElementById("add-id").value = "";
+      document.getElementById("add-alias").value = "";
+      document.getElementById("add-host").value = "";
+      loadContacts();
+    }
+  } catch (e) {
+    status.textContent = e.message;
+  }
+}
 
 let discovered = [];
 
@@ -428,42 +501,9 @@ async function loadPeers() {
     row.onclick = () => {
       document.getElementById("add-id").value = p.node_id;
       document.getElementById("add-status").textContent =
-        "ID filled — click Add to pair with this PC.";
+        "ID filled — click Next to verify this PC.";
     };
     box.appendChild(row);
-  }
-}
-
-async function addContact(ev) {
-  ev.preventDefault();
-  const id = document.getElementById("add-id").value.trim().toLowerCase().replace(/[^0-9a-f]/g, "");
-  const alias = document.getElementById("add-alias").value.trim();
-  const host = document.getElementById("add-host").value.trim();
-  const dur = parseInt(document.getElementById("add-duration").value, 10);
-  const status = document.getElementById("add-status");
-  if (id.length !== 16) {
-    status.textContent = "ID is 16 hex characters.";
-    return;
-  }
-  status.textContent = "Looking on the LAN…";
-  try {
-    const r = await api("/v1/admin/contacts", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ node_id: id, alias, host: host || null, duration_secs: dur }),
-    });
-    status.textContent =
-      r.status === "approved" ? "Approved. You can browse it now."
-      : r.status === "pending" ? "Request sent. Waiting for approval."
-      : "Denied.";
-    if (r.status === "approved" || r.status === "pending") {
-      document.getElementById("add-id").value = "";
-      document.getElementById("add-alias").value = "";
-      document.getElementById("add-host").value = "";
-      loadContacts();
-    }
-  } catch (e) {
-    status.textContent = e.message;
   }
 }
 
@@ -597,11 +637,19 @@ document.getElementById("btn-add").onclick = () => {
   const form = document.getElementById("add-form");
   form.hidden = !form.hidden;
   if (!form.hidden) {
+    resetAddStage();
     document.getElementById("add-id").focus();
     loadPeers();
   }
 };
 document.getElementById("add-form").onsubmit = addContact;
+document.getElementById("add-fp-ok").onchange = (e) => {
+  document.getElementById("add-confirm").disabled = !e.target.checked;
+};
+document.getElementById("add-back").onclick = () => {
+  resetAddStage();
+  document.getElementById("add-status").textContent = "";
+};
 
 const drag = document.getElementById("title-drag");
 drag.addEventListener("mousedown", (e) => {

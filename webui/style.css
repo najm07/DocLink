@@ -160,6 +160,7 @@ aside {
 .add-form input, .add-form select {
   width: 100%; height: 26px; padding: 0 8px;
   border: 1px solid var(--line); background: var(--bg);
+  margin-bottom: 10px;
 }
 .add-form input:focus, .add-form select:focus {
   outline: 1px solid var(--accent); border-color: var(--accent);
@@ -325,3 +326,24 @@ button.primary {
   font-size: 12px;
 }
 #sb-mid { opacity: 0.9; }
+
+/* ---- Add PC fingerprint verification ---- */
+#add-verify .fp {
+  display: block;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  word-break: break-all;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.14);
+  margin: 4px 0 10px;
+  user-select: all;
+}
+#add-verify .fp-confirm {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+#add-verify .fp-confirm input { margin-top: 2px; }
