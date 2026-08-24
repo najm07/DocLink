@@ -374,12 +374,24 @@ fn spawn_event_poller(proxy: tao::event_loop::EventLoopProxy<String>) {
     std::thread::spawn(move || {
         let mut last: u64 = load_cursor();
         let mut primed = last != 0;
+        // Daemon liveness watch: when the admin plane comes back after
+        // being down, the main webview is probably showing a connection-
+        // refused page — tell the UI thread to reload it.
+        let mut prev_up: Option<bool> = None;
         loop {
             std::thread::sleep(Duration::from_secs(5));
             let port = read_admin_port();
+            let up = admin_up(port);
+            if prev_up == Some(false) && up {
+                let _ = proxy.send_event("web-reload".to_string());
+            }
+            prev_up = Some(up);
+            if !up {
+                continue; // daemon not up yet / restarting — keep trying
+            }
             let Some(body) = http_get_json(port, &format!("/v1/admin/events?since={last}"))
             else {
-                continue; // daemon not up yet / restarting — keep trying
+                continue;
             };
             let Ok(events) = serde_json::from_str::<Vec<DaemonEvent>>(&body) else {
                 continue;
@@ -534,7 +546,7 @@ fn main() -> wry::Result<()> {
         .build(&event_loop)
         .expect("failed to create window");
 
-    let _webview = WebViewBuilder::new()
+    let main_webview = WebViewBuilder::new()
         .with_url(&admin_url)
         .with_ipc_handler(move |req| {
             let _ = proxy.send_event(req.body().clone());
@@ -595,6 +607,11 @@ fn main() -> wry::Result<()> {
                     window.set_visible(true);
                     window.set_focus();
                     visible_clone.store(true, Ordering::SeqCst);
+                }
+                "web-reload" => {
+                    // Daemon came back after a crash/port hiccup; the
+                    // webview is likely stuck on "refused to connect".
+                    let _ = main_webview.evaluate_script("location.reload();");
                 }
                 "quit" => {
                     // Exit the app; stop the daemon we spawned gracefully

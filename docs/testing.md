@@ -76,7 +76,7 @@ identity key and stores live next to the exe):
 | Symptom | Likely cause |
 |---|---|
 | Extra black terminal | old daemon still running — kill `doclinkd.exe` and relaunch `doclink-win.exe` |
-| Window blank / never loads | daemon didn't start — open `doclinkd.log` next to the exe |
+| Window blank / "can't reach this page" | daemon didn't start - open `doclinkd.log` next to the exe. `os error 10013` = Windows reserved the port range (winnat/Hyper-V); current builds fall back to the next free port automatically and the window reloads itself once the daemon is up - start `doclink-win.exe` again |
 | Peer never appears online | firewall blocking mDNS UDP 5353, or different subnet (use Advanced host:port) |
 | "that's this PC's own DocLink ID" | you pasted the local ID — copy the ID from the OTHER PC's window header |
 | Add PC fails with 403/401 | clock skew > 5 min between PCs — sync clocks |

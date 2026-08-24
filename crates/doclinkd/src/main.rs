@@ -77,6 +77,39 @@ async fn wait_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.changed().await;
 }
 
+/// Bind on `host`, trying `preferred` and the next `tries-1` ports.
+///
+/// Why fallback: Windows (winnat / Hyper-V / WSL) reserves dynamic port
+/// ranges at boot, so our fixed default can suddenly fail with
+/// "os error 10013" even though nothing is listening. mDNS advertises
+/// whichever port actually bound, so peer discovery keeps working; only
+/// the fixed-port subnet scan degrades.
+async fn bind_with_fallback(
+    host: std::net::IpAddr,
+    preferred: u16,
+    tries: u16,
+) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
+    let last = preferred.saturating_add(tries - 1);
+    for p in preferred..=last {
+        match tokio::net::TcpListener::bind((host, p)).await {
+            Ok(l) => {
+                if p != preferred {
+                    tracing::warn!(
+                        requested = preferred,
+                        actual = p,
+                        "default port unavailable (reserved or busy) — using fallback"
+                    );
+                }
+                return Ok((l, p));
+            }
+            Err(e) => tracing::warn!(port = p, %e, "bind failed"),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "no bindable port in {preferred}..={last} — check `netsh int ipv4 show excludedportrange protocol=tcp` and any running DocLink instances"
+    ))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -124,24 +157,6 @@ async fn main() -> Result<()> {
     // global timeout — file downloads are long — call sites set their own.
     let http = peer::client();
 
-    // mDNS advertiser: register our service so other PCs can resolve our ID.
-    if cfg.advertise() {
-        let _advertiser = match doclink_core::discovery::start_advertiser(
-            &node.node_id,
-            &node.name,
-            http_port,
-        ) {
-            Some(d) => Some(d),
-            None => {
-                tracing::warn!("mDNS advertising failed — peers cannot discover this PC by ID");
-                None
-            }
-        };
-        info!("advertising on mDNS as _doclink._tcp.local");
-    } else {
-        info!("mDNS advertising disabled — this PC is hidden from discovery");
-    }
-
     // mDNS browser: watch for other PCs and populate the registry.
     tokio::spawn(doclink_core::discovery::run_browser(
         registry.clone(),
@@ -179,17 +194,45 @@ async fn main() -> Result<()> {
     // Data plane: LAN-facing, TLS-only (v0.3), signature-authenticated,
     // read-only, scope-filtered. The certificate is derived from the node
     // identity, so peers pin sha256(SPKI) == fingerprint.
-    let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), contacts.clone(), pairing.clone(), events.clone());
-    let data_app = server::router(data_state);
-    let data_addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
-    let data_tcp = tokio::net::TcpListener::bind(data_addr).await?;
+    let (data_tcp, http_port) =
+        bind_with_fallback(std::net::IpAddr::from([0, 0, 0, 0]), http_port, 200).await?;
     let node_tls = doclink_core::cert::NodeTls::from_identity(&identity)
         .context("deriving node TLS certificate")?;
     let data_tls_cfg = tls::server_config(&node_tls)?;
-    info!(%data_addr, "share API (peer-facing) listening on TLS");
+    info!(data_addr = %data_tcp.local_addr()?, "share API (peer-facing) listening on TLS");
 
     // Admin plane: localhost only — window UI, contacts, approvals, proxy.
-    let admin_port = http_port + 1;
+    // Lives right after the data port; falls back the same way.
+    let (admin_tcp, admin_port) =
+        bind_with_fallback(std::net::IpAddr::from([127, 0, 0, 1]), http_port + 1, 200).await?;
+    let admin_addr = admin_tcp.local_addr()?;
+    info!(%admin_addr, "web UI listening — open http://{}", admin_addr);
+
+    // Publish the actual bound port so doclink-win (and other local
+    // tools) can find this instance even with a --port override.
+    let _ = std::fs::write("doclink-admin.port", admin_port.to_string());
+
+    // mDNS advertiser: register our service so other PCs can resolve our
+    // ID. Runs after binding so it advertises the port we actually got —
+    // with port fallback this may differ from doclink.toml's default.
+    let _advertiser = if cfg.advertise() {
+        match doclink_core::discovery::start_advertiser(&node.node_id, &node.name, http_port) {
+            Some(d) => {
+                info!(port = http_port, "advertising on mDNS as _doclink._tcp.local");
+                Some(d)
+            }
+            None => {
+                tracing::warn!("mDNS advertising failed — peers cannot discover this PC by ID");
+                None
+            }
+        }
+    } else {
+        info!("mDNS advertising disabled — this PC is hidden from discovery");
+        None
+    };
+
+    let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), contacts.clone(), pairing.clone(), events.clone());
+    let data_app = server::router(data_state);
     let admin_state = admin::AppState::new(
         node,
         identity,
@@ -205,13 +248,6 @@ async fn main() -> Result<()> {
         events,
     );
     let admin_app = admin::router(admin_state);
-    let admin_addr = std::net::SocketAddr::from(([127, 0, 0, 1], admin_port));
-    let admin_tcp = tokio::net::TcpListener::bind(admin_addr).await?;
-    info!(%admin_addr, "web UI listening — open http://{}", admin_addr);
-
-    // Publish the actual bound port so doclink-win (and other local
-    // tools) can find this instance even with a --port override.
-    let _ = std::fs::write("doclink-admin.port", admin_port.to_string());
 
     let data = tls::serve(data_tcp, data_app, data_tls_cfg, shutdown_rx.clone());
     let admin = axum::serve(admin_tcp, admin_app).with_graceful_shutdown(wait_shutdown(shutdown_rx));
