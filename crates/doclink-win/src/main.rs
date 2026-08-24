@@ -534,15 +534,20 @@ fn main() -> wry::Result<()> {
     // move of `proxy` into its IPC handler.
     let toast_proxy = proxy.clone();
     let poller_proxy = proxy.clone();
+    let autostart_hide_proxy = proxy.clone();
 
     #[cfg(windows)]
     let _tray = run_tray(proxy.clone());
+
+    // --autostart (Run-key launches): boot straight to the tray.
+    let autostart = std::env::args().any(|a| a == "--autostart");
 
     let window = WindowBuilder::new()
         .with_title("DocLink")
         .with_decorations(false)
         .with_inner_size(LogicalSize::new(1120.0, 740.0))
         .with_min_inner_size(LogicalSize::new(800.0, 520.0))
+        .with_visible(!autostart)
         .build(&event_loop)
         .expect("failed to create window");
 
@@ -552,7 +557,6 @@ fn main() -> wry::Result<()> {
             let _ = proxy.send_event(req.body().clone());
         })
         .build(&window)?;
-
     let visible = Arc::new(AtomicBool::new(true));
     let visible_clone = visible.clone();
 
@@ -571,12 +575,19 @@ fn main() -> wry::Result<()> {
     };
     spawn_event_poller(poller_proxy);
 
+    // --autostart: hide the window AFTER wry's own deferred ShowWindow
+    // lands (a plain build-time hide loses that race).
+    if autostart {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            let _ = autostart_hide_proxy.send_event("autostart-hide".to_string());
+        });
+    }
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
-            Event::NewEvents(StartCause::Init) => {
-                // Window starts visible.
-            }
+            Event::NewEvents(StartCause::Init) => {}
             Event::UserEvent(cmd) => match cmd.as_str() {
                 "drag" => {
                     let _ = window.drag_window();
@@ -612,6 +623,10 @@ fn main() -> wry::Result<()> {
                     // Daemon came back after a crash/port hiccup; the
                     // webview is likely stuck on "refused to connect".
                     let _ = main_webview.evaluate_script("location.reload();");
+                }
+                "autostart-hide" => {
+                    window.set_visible(false);
+                    visible_clone.store(false, Ordering::SeqCst);
                 }
                 "quit" => {
                     // Exit the app; stop the daemon we spawned gracefully

@@ -26,3 +26,13 @@ tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# ShellExecuteExW "print" verb for the M3 print button. The shell types
+# sit behind Win32_System_Registry in windows-0.58's feature graph.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Registry",
+] }

@@ -609,8 +609,22 @@ async function loadListing() {
         const pr = document.createElement("button");
         pr.type = "button";
         pr.textContent = "Print";
-        pr.disabled = true;
-        pr.title = "Coming next";
+        pr.title = "Download and hand to Windows' print verb";
+        pr.onclick = async () => {
+          const mid = document.getElementById("sb-mid");
+          const prev = mid.textContent;
+          pr.disabled = true;
+          mid.textContent = "Printing " + e.name + "…";
+          try {
+            await api("/v1/admin/print/" + state.selected + "?path=" + encodeURIComponent(e.path), { method: "POST" });
+            mid.textContent = "Sent to printer: " + e.name;
+          } catch (err) {
+            mid.textContent = "";
+            status.textContent = err.message;
+          }
+          pr.disabled = false;
+          setTimeout(() => { if (mid.textContent.startsWith("Sent to printer")) mid.textContent = prev; }, 4000);
+        };
         acts.append(dl, pr);
       }
       grid.appendChild(row);

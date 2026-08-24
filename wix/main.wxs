@@ -1,0 +1,113 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  DocLink per-user installer (WiX3).
+
+  - Installs to %LOCALAPPDATA%\Programs\DocLink (no UAC required)
+  - Start-menu shortcut
+  - Autostart on login via HKCU Run key (disable: Task Manager > Startup)
+  - Asks running shell instances to close before upgrade/removal and
+    force-terminates the background daemon
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
+     xmlns:util='http://schemas.microsoft.com/wix/UtilExtension'>
+
+  <Product Id='*'
+           Name='DocLink'
+           Language='1033'
+           Codepage='1252'
+           Version='$(var.Version)'
+           Manufacturer='DocLink'
+           UpgradeCode='01EC2160-E3A1-49EA-8B4F-89B5849DB0B9'>
+
+    <Package InstallerVersion='500'
+             Compressed='yes'
+             InstallScope='perUser'
+             Platform='x64'
+             Description='DocLink — peer-to-peer LAN file sharing'
+             Manufacturer='DocLink' />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab='yes' />
+    <Property Id='DISABLEADVTSHORTCUTS' Value='1' />
+
+    <Property Id='ARPHELPLINK' Value='https://github.com/najm07/DocLink' />
+
+    <Condition Message='DocLink requires Windows 10 or newer.'>
+      Installed OR (VersionNT &gt;= 601)
+    </Condition>
+
+    <!-- Ask the shell to exit gracefully; the headless daemon has no
+         window, so it is force-terminated instead. -->
+    <util:CloseApplication Id='CloseShell'
+                           Target='doclink-win.exe'
+                           CloseMessage='yes'
+                           RebootPrompt='no' />
+    <util:CloseApplication Id='CloseDaemon'
+                           Target='doclinkd.exe'
+                           TerminateProcess='1'
+                           RebootPrompt='no' />
+
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='LocalAppDataFolder'>
+        <Directory Id='ProgramsRootDir' Name='Programs'>
+          <Directory Id='INSTALLFOLDER' Name='DocLink'>
+            <!-- Per-user installs require every component that touches
+                 the user profile to carry an HKCU KeyPath (ICE38), and
+                 created folders to be cleaned up explicitly (ICE64). -->
+            <Component Id='ShellExe' Guid='BF99C0FF-511E-4D58-83CA-B41EF4FDFDD8'>
+              <RegistryValue Root='HKCU' Key='Software\DocLink\components'
+                             Name='shell' Type='integer' Value='1' KeyPath='yes' />
+              <File Id='WinExe' Source='$(var.Src)\doclink-win.exe'
+                    Checksum='yes' />
+            </Component>
+            <Component Id='DaemonExe' Guid='449A116A-E109-4804-AA34-682DC3E3261E'>
+              <RegistryValue Root='HKCU' Key='Software\DocLink\components'
+                             Name='daemon' Type='integer' Value='1' KeyPath='yes' />
+              <File Id='DExe' Source='$(var.Src)\doclinkd.exe'
+                    Checksum='yes' />
+            </Component>
+            <Component Id='Autostart' Guid='7C64E9E0-9F14-4F62-A0C6-2E1B39D6A551'>
+              <RegistryValue Root='HKCU'
+                             Key='Software\Microsoft\Windows\CurrentVersion\Run'
+                             Name='DocLink'
+                             Type='string'
+                             Value='[INSTALLFOLDER]doclink-win.exe --autostart'
+                             KeyPath='yes' />
+              <RemoveFolder Id='RemoveInstallFolder'
+                            Directory='INSTALLFOLDER' On='uninstall' />
+              <RemoveFolder Id='RemoveProgramsRoot'
+                            Directory='ProgramsRootDir' On='uninstall' />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+      <Directory Id='ProgramMenuFolder'>
+        <Directory Id='ShortcutFolder' Name='DocLink'>
+          <Component Id='StartMenuShortcut' Guid='D9D9CB37-7444-4239-8271-230FA2BADD88'>
+            <RegistryValue Root='HKCU'
+                           Key='Software\DocLink'
+                           Name='shortcutInstalled'
+                           Type='integer'
+                           Value='1'
+                           KeyPath='yes' />
+            <Shortcut Id='DocLinkShortcut'
+                      Name='DocLink'
+                      Description='Peer-to-peer LAN file sharing'
+                      Target='[INSTALLFOLDER]doclink-win.exe'
+                      WorkingDirectory='INSTALLFOLDER' />
+            <RemoveFolder Id='RemoveShortcutFolder' On='uninstall' />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id='Main' Title='DocLink' Level='1' Absent='disallow'>
+      <ComponentRef Id='ShellExe' />
+      <ComponentRef Id='DaemonExe' />
+      <ComponentRef Id='Autostart' />
+      <ComponentRef Id='StartMenuShortcut' />
+    </Feature>
+
+  </Product>
+</Wix>
+

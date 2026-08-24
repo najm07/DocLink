@@ -67,7 +67,7 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.3, TLS
 - [x] My Share view: browse/manage own share, delete items, reveal in Explorer
 - [x] Share… panel per item; Access editor per grant (Everything / selected items)
 - [x] Streaming downloads + `Range` support (no whole-file buffering)
-- [ ] Print button: download to temp, then Windows shell `print` verb via windows-rs (`ShellExecuteEx`)
+- [x] Print button: download to temp, then Windows shell `print` verb via windows-rs (`ShellExecuteEx`)
 - [x] Toast notifications (pair request received, grant expiring soon)
 - [x] Graceful shutdown (tray Quit / Ctrl-C; admin stop endpoint)
 - [x] Contact status refresh: pending contacts re-poll the grantor's `/v1/pair/status`, and peers stay live via TCP keepalive (mDNS re-announcements alone don't refresh liveness)
@@ -77,8 +77,8 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.3, TLS
 
 - [x] TLS with pinned peer certificates (protocol v0.3 — cert SPKI is the ed25519 identity key)
 - [x] Identity key file permissions hardening (icacls/chmod 600 on load + creation)
-- [ ] Proper installer (MSI via cargo-wix, mirror Printlink's approach)
-- [ ] Autostart on login (registry Run key or Scheduled Task)
+- [x] Proper installer — per-user MSI: `.\msi.ps1` → `dist\DocLink-setup.msi` (WiX3, auto-downloaded to `tools\`)
+- [x] Autostart on login (HKCU Run key installed by the MSI; boots to tray via `--autostart`; disable in Task Manager → Startup)
 
 ### M5 — Discovery mode (network PC browser)
 

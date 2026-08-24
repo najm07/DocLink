@@ -105,6 +105,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/myshare/reveal", post(myshare_reveal))
         .route("/v1/admin/shutdown", post(shutdown_node))
         .route("/v1/admin/events", get(events_since))
+        .route("/v1/admin/print/{node_id}", post(print_remote))
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
         .fallback(static_file)
@@ -966,6 +967,125 @@ struct EventsQuery {
 /// so toasts survive neither restarts nor duplicates.
 async fn events_since(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Json<Vec<crate::events::Event>> {
     Json(s.inner.events.lock().unwrap().since(q.since))
+}
+
+// ---- Print (M3) ----
+
+/// Staging dir for files sent to the printer. Files must outlive the
+/// async handler (the printing app reads them later), so we keep them
+/// around and garbage-collect anything older than a day on each print.
+fn print_staging_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("DocLinkPrint");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+        for e in entries.flatten() {
+            if let Ok(m) = e.metadata() {
+                if m.modified().map(|t| t < cutoff).unwrap_or(false) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    dir
+}
+
+/// Hand a fully-written file to the shell's `print` verb (uses whatever
+/// app owns the extension: notepad for .txt, the PDF reader, ...).
+#[cfg(windows)]
+fn shell_print(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::{
+        ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    const SE_ERR_NOASSOC: usize = 31;
+
+    let file_w: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let verb_w: Vec<u16> = "print\0".encode_utf16().collect();
+
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI,
+        lpVerb: PCWSTR(verb_w.as_ptr()),
+        lpFile: PCWSTR(file_w.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    let hr = unsafe { ShellExecuteExW(&mut sei) };
+    // Shell-level failures (no association, access denied, …) surface via
+    // the legacy hInstApp <= 32 contract; the HRESULT alone just says
+    // "the call ran". Trust hInstApp.
+    let _ = hr;
+    let code = sei.hInstApp.0 as usize;
+    if code <= 32 {
+        return Err(match code {
+            SE_ERR_NOASSOC => "Windows has no app associated with this file type — open it once manually to set one".to_string(),
+            other => format!("could not start printing (shell error {other})"),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn shell_print(_path: &std::path::Path) -> Result<(), String> {
+    Err("printing is only supported on Windows".to_string())
+}
+
+/// Download a peer's file through the signed proxy and hand it to
+/// Windows' print verb. Runs entirely on the localhost admin plane; the
+/// peer sees an ordinary authenticated download.
+async fn print_remote(
+    State(s): State<AppState>,
+    Path(node_id): Path<String>,
+    Query(q): Query<BrowseQuery>,
+) -> Result<StatusCode, axum::response::Response> {
+    use axum::response::IntoResponse;
+    if q.path.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "path must name a file").into_response());
+    }
+    let resp = proxy::file(&s, &node_id, &q.path, None)
+        .await
+        .map_err(|e| e.into_response())?;
+    let bytes = axum::body::to_bytes(resp.into_body(), 2 * 1024 * 1024 * 1024)
+        .await
+        .map_err(|e| {
+            err(StatusCode::BAD_GATEWAY, format!("download failed: {e}")).into_response()
+        })?;
+
+    // Keep the remote filename (and thus its extension/association).
+    let name = q.path.rsplit('/').next().unwrap_or("document");
+    let safe_name: String = name
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+        .collect();
+    let dir = print_staging_dir();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let target = dir.join(format!("{stamp}-{safe_name}"));
+    std::fs::write(&target, &bytes).map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, format!("staging failed: {e}"))
+            .into_response()
+    })?;
+
+    tokio::task::spawn_blocking(move || shell_print(&target))
+        .await
+        .map_err(|e| {
+            err(StatusCode::INTERNAL_SERVER_ERROR, format!("print task failed: {e}"))
+                .into_response()
+        })?
+        .map_err(|m| err(StatusCode::UNPROCESSABLE_ENTITY, m).into_response())?;
+
+    tracing::info!(file = %safe_name, peer = %node_id, "sent to printer");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---- Browse proxy ----
