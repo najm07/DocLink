@@ -15,3 +15,5 @@
 /graphify-out
 
 /build.log
+# WiX toolset (downloaded by msi.ps1)
+/tools/
