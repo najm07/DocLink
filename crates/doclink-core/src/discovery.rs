@@ -11,7 +11,8 @@
 //! others.
 
 use crate::protocol::{Peer, PEER_TTL_SECS};
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+pub use mdns_sd::ServiceDaemon;
+use mdns_sd::ServiceInfo;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
@@ -62,6 +63,12 @@ impl PeerRegistry {
             peer.last_seen_unix = unix_now();
         }
     }
+
+    /// Drop a peer immediately (mDNS goodbye on unregister / hide toggle)
+    /// instead of waiting out PEER_TTL_SECS.
+    pub fn remove(&self, node_id: &str) {
+        self.peers.lock().unwrap().remove(node_id);
+    }
 }
 
 /// Primary interface IPv4, derived from the routing table.
@@ -93,14 +100,17 @@ fn probe_ipv4(target: Ipv4Addr, port: u16) -> Option<Ipv4Addr> {
     }
 }
 
-/// mDNS advertiser: registers our service so other PCs can resolve our ID.
-/// Returns a handle that can be dropped to stop advertising.
-pub fn start_advertiser(
+/// Full mDNS instance name for a node (needed to unregister later).
+pub fn full_instance_name(node_id: &str) -> String {
+    format!("doclink-{node_id}.{MDNS_SERVICE_TYPE}")
+}
+
+/// Build the ServiceInfo we advertise (shared by start and live toggling).
+fn service_info_for(
     node_id: &str,
     name: &str,
     http_port: u16,
-) -> Option<ServiceDaemon> {
-    let daemon = ServiceDaemon::new().ok()?;
+) -> Option<ServiceInfo> {
     let ip = primary_ipv4()?;
     let instance_name = format!("doclink-{}", node_id);
     let host_name = format!(
@@ -113,7 +123,7 @@ pub fn start_advertiser(
     let mut props = HashMap::new();
     props.insert("node_id".to_string(), node_id.to_string());
     props.insert("http_port".to_string(), http_port.to_string());
-    let service = ServiceInfo::new(
+    ServiceInfo::new(
         MDNS_SERVICE_TYPE,
         &instance_name,
         &host_name,
@@ -121,11 +131,43 @@ pub fn start_advertiser(
         http_port,
         props,
     )
-    .ok()?;
+    .ok()
+}
+
+/// A fresh mDNS daemon. Keep ONE per process for the whole lifetime and
+/// toggle advertise via [`advertise_on`] / [`stop_advertising`] — creating
+/// a new daemon per toggle makes peers' record caches treat the return as
+/// an unchanged record, so ServiceResolved never re-fires.
+pub fn daemon() -> Option<ServiceDaemon> {
+    ServiceDaemon::new().ok()
+}
+
+/// mDNS advertiser: registers our service so other PCs can resolve our ID.
+/// Returns a handle that can be dropped to stop advertising.
+pub fn start_advertiser(
+    node_id: &str,
+    name: &str,
+    http_port: u16,
+) -> Option<ServiceDaemon> {
+    let daemon = daemon()?;
+    let service = service_info_for(node_id, name, http_port)?;
     if daemon.register(service).is_err() {
         return None;
     }
     Some(daemon)
+}
+
+/// Register our instance on an existing daemon (live advertise toggle).
+pub fn advertise_on(daemon: &ServiceDaemon, node_id: &str, name: &str, port: u16) -> bool {
+    match service_info_for(node_id, name, port) {
+        Some(svc) => daemon.register(svc).is_ok(),
+        None => false,
+    }
+}
+
+/// Send an mDNS goodbye for our instance (live hide toggle).
+pub fn stop_advertising(daemon: &ServiceDaemon, node_id: &str) {
+    let _ = daemon.unregister(&full_instance_name(node_id));
 }
 
 /// Pick the most usable address a resolved service advertises.
@@ -168,7 +210,18 @@ pub async fn run_browser(
                 while let Ok(event) = rx.try_recv() {
                     use mdns_sd::ServiceEvent::*;
                     match event {
-                        ServiceFound(_, _) | ServiceRemoved(_, _) => {}
+                        ServiceFound(_, _) => {}
+                        ServiceRemoved(_, fullname) => {
+                            // Goodbye packet (peer hid itself or shut down
+                            // cleanly): drop immediately, don't age out.
+                            // Event carries only the instance fullname.
+                            if let Some(id) = fullname
+                                .strip_prefix("doclink-")
+                                .and_then(|r| r.split('.').next())
+                            {
+                                registry.remove(id);
+                            }
+                        }
                         ServiceResolved(info) => {
                             let props = info.get_properties();
                             let Some(node_id) = props

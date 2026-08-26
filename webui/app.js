@@ -641,7 +641,108 @@ async function loadListing() {
   }
 }
 
+// ---- network view (M5): live LAN discovery + visibility toggle ----
+
+let netTimer = null;
+
+async function renderNet() {
+  const ul = document.getElementById("netlist");
+  if (!ul) return;
+  let peers = [], contacts = [];
+  try {
+    [peers, contacts] = await Promise.all([
+      api("/v1/admin/peers"),
+      api("/v1/admin/contacts"),
+    ]);
+  } catch (_) { /* daemon restarting; keep last frame */ }
+
+  const badge = document.getElementById("act-net-badge");
+  if (badge) {
+    badge.hidden = peers.length === 0;
+    badge.textContent = peers.length;
+  }
+
+  ul.innerHTML = "";
+  if (!peers.length) {
+    const li = document.createElement("li");
+    li.className = "hint-row";
+    li.textContent =
+      "No PCs discovered yet. They must run DocLink with 'Visible' enabled and allow mDNS (UDP 5353) through the firewall.";
+    ul.appendChild(li);
+  }
+  for (const p of peers) {
+    const known = contacts.find((c) => c.node_id === p.node_id);
+    const li = document.createElement("li");
+    li.className = "row" + (known && state.selected === p.node_id ? " active" : "");
+    li.innerHTML =
+      '<span class="dot on"></span>' +
+      '<span class="grow"><span class="name"></span>' +
+      '<span class="sub">' + escapeHtml(p.addr + ":" + p.http_port) + "</span></span>" +
+      '<span class="tag"></span>';
+    li.querySelector(".name").textContent = known ? known.alias : groupId(p.node_id);
+    const tag = li.querySelector(".tag");
+    if (known) {
+      tag.textContent = known.status;
+    } else {
+      const add = document.createElement("button");
+      add.type = "button";
+      add.textContent = "Add";
+      add.onclick = (ev) => {
+        ev.stopPropagation();
+        document.getElementById("add-id").value = p.node_id;
+        setView("pcs");
+        const form = document.getElementById("add-form");
+        form.hidden = false;
+        resetAddStage();
+        document.getElementById("add-alias").focus();
+        loadPeers();
+      };
+      tag.appendChild(add);
+    }
+    ul.appendChild(li);
+  }
+}
+
+async function loadVisibility() {
+  const cb = document.getElementById("adv-toggle");
+  if (!cb) return;
+  try {
+    const s = await api("/v1/admin/settings");
+    cb.checked = !!s.advertise;
+  } catch (_) { /* keep last known */ }
+}
+
+async function saveVisibility() {
+  const cb = document.getElementById("adv-toggle");
+  try {
+    const r = await api("/v1/admin/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ advertise: cb.checked }),
+    });
+    cb.checked = !!r.advertise;
+  } catch (e) {
+    document.getElementById("add-status").textContent = e.message || String(e);
+    // revert to server truth
+    loadVisibility();
+  }
+}
+
 // ---- chrome wiring ----
+
+function initNetView() {
+  const cb = document.getElementById("adv-toggle");
+  if (!cb) return;
+  cb.addEventListener("change", saveVisibility);
+  document.querySelectorAll(".act").forEach((b) => {
+    b.addEventListener("click", () => {
+      if (b.dataset.view === "net") {
+        renderNet();
+        loadVisibility();
+      }
+    });
+  });
+}
 
 document.querySelectorAll(".act").forEach((b) => {
   b.onclick = () => setView(b.dataset.view);
@@ -682,10 +783,12 @@ loadInfo();
 loadContacts();
 loadRequests();
 loadGrants();
+initNetView();
 setInterval(() => {
   loadContacts();
   loadRequests();
   loadGrants();
   if (!document.getElementById("add-form").hidden) loadPeers();
+  if (state.view === "net") renderNet();
 }, 5000);
 loadListing();

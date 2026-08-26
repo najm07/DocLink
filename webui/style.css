@@ -347,3 +347,14 @@ button.primary {
   margin-bottom: 10px;
 }
 #add-verify .fp-confirm input { margin-top: 2px; }
+
+/* ---- Network view (M5) ---- */
+.vis-toggle {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  opacity: 0.9;
+  cursor: pointer;
+}
+.net-hint { font-size: 11px; margin: 4px 10px; }

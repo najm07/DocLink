@@ -212,27 +212,32 @@ async fn main() -> Result<()> {
     // tools) can find this instance even with a --port override.
     let _ = std::fs::write("doclink-admin.port", admin_port.to_string());
 
-    // mDNS advertiser: register our service so other PCs can resolve our
-    // ID. Runs after binding so it advertises the port we actually got —
-    // with port fallback this may differ from doclink.toml's default.
-    let _advertiser = if cfg.advertise() {
-        match doclink_core::discovery::start_advertiser(&node.node_id, &node.name, http_port) {
-            Some(d) => {
-                info!(port = http_port, "advertising on mDNS as _doclink._tcp.local");
-                Some(d)
-            }
-            None => {
-                tracing::warn!("mDNS advertising failed — peers cannot discover this PC by ID");
-                None
-            }
+    // mDNS advertiser: ONE daemon for the whole process lifetime; the
+    // settings toggle only registers/unregisters on it (a fresh daemon's
+    // announcements don't re-fire peers' record caches). Starts after
+    // binding so it advertises the port we actually got.
+    let advertiser: std::sync::Arc<std::sync::Mutex<
+        Option<doclink_core::discovery::ServiceDaemon>,
+    >> = std::sync::Arc::new(std::sync::Mutex::new(
+        doclink_core::discovery::daemon(),
+    ));
+    let advertise_on = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(cfg.advertise()));
+    if cfg.advertise() {
+        let ok = advertiser.lock().unwrap().as_ref()
+            .map(|d| doclink_core::discovery::advertise_on(d, &node.node_id, &node.name, http_port))
+            .unwrap_or(false);
+        if ok {
+            info!(port = http_port, "advertising on mDNS as _doclink._tcp.local");
+        } else {
+            tracing::warn!("mDNS advertising failed — peers cannot discover this PC by ID");
         }
     } else {
         info!("mDNS advertising disabled — this PC is hidden from discovery");
-        None
-    };
+    }
 
     let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), contacts.clone(), pairing.clone(), events.clone());
     let data_app = server::router(data_state);
+    let config_path = cli.config.clone().unwrap_or_else(|| PathBuf::from("doclink.toml"));
     let admin_state = admin::AppState::new(
         node,
         identity,
@@ -246,6 +251,10 @@ async fn main() -> Result<()> {
         http,
         shutdown_tx,
         events,
+        advertiser,
+        advertise_on,
+        http_port,
+        config_path,
     );
     let admin_app = admin::router(admin_state);
 

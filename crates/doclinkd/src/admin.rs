@@ -22,6 +22,7 @@ use doclink_core::protocol::{
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -47,6 +48,17 @@ pub(crate) struct AdminInner {
     pub shutdown: tokio::sync::watch::Sender<bool>,
     /// Toast/notification event log shared with the data plane.
     pub events: crate::events::SharedEvents,
+    /// Runtime-managed mDNS advertiser (settings toggle hides/reveals us).
+    pub advertiser: std::sync::Arc<
+        std::sync::Mutex<Option<doclink_core::discovery::ServiceDaemon>>,
+    >,
+    /// Mirrors whether we are currently registered (the handle itself
+    /// stays alive even while hidden).
+    pub advertise_on: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The port peers actually reach us on (advertised via mDNS).
+    pub data_port: u16,
+    /// Where doclink.toml lives, so the settings toggle can persist.
+    pub config_path: std::path::PathBuf,
 }
 
 impl AppState {
@@ -64,6 +76,12 @@ impl AppState {
         http: reqwest::Client,
         shutdown: tokio::sync::watch::Sender<bool>,
         events: crate::events::SharedEvents,
+        advertiser: std::sync::Arc<
+            std::sync::Mutex<Option<doclink_core::discovery::ServiceDaemon>>,
+        >,
+        advertise_on: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        data_port: u16,
+        config_path: std::path::PathBuf,
     ) -> Self {
         Self {
             inner: Arc::new(AdminInner {
@@ -79,6 +97,10 @@ impl AppState {
                 http,
                 shutdown,
                 events,
+                advertiser,
+                advertise_on,
+                data_port,
+                config_path,
             }),
         }
     }
@@ -86,7 +108,7 @@ impl AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/v1/admin/info", get(info))
+        .route("/v1/admin/info", get(admin_info))
         .route("/v1/admin/peers", get(list_peers))
         .route("/v1/admin/contacts", get(list_contacts).post(add_contact))
         .route("/v1/admin/contact-fingerprint", get(contact_fingerprint))
@@ -105,6 +127,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/myshare/reveal", post(myshare_reveal))
         .route("/v1/admin/shutdown", post(shutdown_node))
         .route("/v1/admin/events", get(events_since))
+        .route("/v1/admin/settings", get(get_settings).put(put_settings))
         .route("/v1/admin/print/{node_id}", post(print_remote))
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
@@ -238,7 +261,7 @@ fn to_grant_info(g: &Grant) -> GrantInfo {
     }
 }
 
-async fn info(State(s): State<AppState>) -> Json<NodeInfo> {
+async fn admin_info(State(s): State<AppState>) -> Json<NodeInfo> {
     Json(s.inner.node.clone())
 }
 
@@ -962,6 +985,101 @@ struct EventsQuery {
     since: u64,
 }
 
+// ---- Settings (M5 discovery toggle) ----
+
+/// Rewrite doclink.toml with the current effective config, flipping
+/// `advertise`. Other keys are preserved as values (comments are not).
+fn persist_advertise(path: &std::path::Path, cfg: &crate::config::Config, advertise: bool) -> Result<(), String> {
+    let mut next = cfg.clone();
+    next.advertise = advertise;
+    let text = toml::to_string_pretty(&next)
+        .map_err(|e| format!("serialize config: {e}"))?;
+    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Effective settings for the UI.
+async fn get_settings(State(s): State<AppState>) -> Json<serde_json::Value> {
+    let advertise = s.inner.advertise_on.load(std::sync::atomic::Ordering::Relaxed);
+    Json(serde_json::json!({
+        "advertise": advertise,
+        "subnetScan": s.inner.scan_enabled,
+        "nodeName": s.inner.node.name,
+    }))
+}
+
+#[derive(Deserialize)]
+struct SettingsBody {
+    /// Hide/reveal this PC on the LAN (mDNS goodbye vs register). The
+    /// daemon handle itself stays alive — re-registering through it is
+    /// what lets peers' caches see the return as a *changed* record.
+    advertise: bool,
+}
+
+/// Toggle beacon suppression live and persist it, so a PC can stay
+/// invisible across restarts while still adding others.
+async fn put_settings(
+    State(s): State<AppState>,
+    Json(body): Json<SettingsBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    use std::sync::atomic::Ordering;
+    let currently = s
+        .inner
+        .advertise_on
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    if body.advertise != currently {
+        let handle = s.inner.advertiser.lock().unwrap().clone();
+        let Some(d) = handle else {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "mDNS is unavailable on this machine",
+            ));
+        };
+        if body.advertise {
+            if !doclink_core::discovery::advertise_on(
+                &d,
+                &s.inner.node.node_id,
+                &s.inner.node.name,
+                s.inner.data_port,
+            ) {
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not register on mDNS",
+                ));
+            }
+            info!(port = s.inner.data_port, "advertising re-enabled on mDNS");
+        } else {
+            doclink_core::discovery::stop_advertising(&d, &s.inner.node.node_id);
+            info!("advertising disabled — this PC is hidden from discovery");
+        }
+        s.inner
+            .advertise_on
+            .store(body.advertise, Ordering::Relaxed);
+    }
+
+    // Persist even when idempotent so the file always matches reality.
+    if let Err(e) = persist_advertise(&s.inner.config_path, &snapshot_config(&s), body.advertise) {
+        tracing::warn!(%e, "could not persist advertise setting to doclink.toml");
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e));
+    }
+    Ok(Json(serde_json::json!({ "advertise": body.advertise })))
+}
+
+/// Rebuild the effective config for persistence. The admin plane keeps
+/// no full Config copy; the mutable settings live in Inner fields.
+fn snapshot_config(s: &AppState) -> crate::config::Config {
+    crate::config::Config {
+        node_name: s.inner.node.name.clone(),
+        http_port: s.inner.data_port,
+        share_root: s.inner.share.root().to_string_lossy().into_owned(),
+        advertise: s
+            .inner
+            .advertise_on
+            .load(std::sync::atomic::Ordering::Relaxed),
+        subnet_scan: s.inner.scan_enabled,
+    }
+}
+
 /// Toast feed for the window shell: everything newer than `since`.
 /// The shell tracks the last id it showed (persisted next to the exe)
 /// so toasts survive neither restarts nor duplicates.
@@ -1232,3 +1350,4 @@ mod tests {
         }
     }
 }
+

@@ -83,8 +83,8 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.3, TLS
 ### M5 — Discovery mode (network PC browser)
 
 - [x] Add dialog lists PCs currently on the LAN running DocLink — click a row to fill the ID (no pasting)
-- [ ] Standalone **Network** view that lists all live PCs at a glance
-- [ ] Settings toggle **Hide this PC from discovery** (beacon suppression) so a PC can stay invisible while still adding others
+- [x] Standalone **Network** view that lists all live PCs at a glance (with one-click Add)
+- [x] Settings toggle **Hide this PC from discovery** — live mDNS goodbye/register, persisted to doclink.toml
 - [x] Respect the hide setting in `doclink.toml` / UI (`advertise = false`)
 
 ### Post-v1 ideas

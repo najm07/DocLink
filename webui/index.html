@@ -42,6 +42,10 @@
       <button type="button" class="act" data-view="grants" title="Granted access">
         <svg viewBox="0 0 24 24"><path d="M12 3l8 4v6c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V7z"/></svg>
       </button>
+      <button type="button" class="act" data-view="net" title="Network — PCs discovered on the LAN">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14 0 18M12 3c-3 3.5-3 14 0 18"/></svg>
+        <span id="act-net-badge" class="act-badge" hidden>0</span>
+      </button>
     </nav>
 
     <aside id="side">
@@ -96,6 +100,18 @@
       <section class="side-view" data-view="grants" hidden>
         <div class="side-head"><h2>GRANTED ACCESS</h2></div>
         <ul id="grants" class="tree"></ul>
+      </section>
+
+      <section class="side-view" data-view="net" hidden>
+        <div class="side-head">
+          <h2>NETWORK</h2>
+          <label class="vis-toggle" title="Hidden PCs stay invisible to discovery but can still add others">
+            <input type="checkbox" id="adv-toggle" checked />
+            Visible
+          </label>
+        </div>
+        <p class="dim net-hint">Live PCs running DocLink on this LAN.</p>
+        <ul id="netlist" class="tree"></ul>
       </section>
     </aside>
 
