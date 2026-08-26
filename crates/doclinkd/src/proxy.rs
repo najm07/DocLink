@@ -17,6 +17,9 @@ struct PeerTarget {
 #[derive(Debug)]
 pub enum ProxyError {
     UnknownPeer,
+    /// Peer answered 404 with no body on a feature route — it is running
+    /// an older DocLink without that endpoint.
+    UnsupportedPeer,
     Upstream(String),
 }
 
@@ -26,6 +29,10 @@ impl IntoResponse for ProxyError {
             ProxyError::UnknownPeer => (
                 StatusCode::NOT_FOUND,
                 "unknown or offline peer".to_string(),
+            ),
+            ProxyError::UnsupportedPeer => (
+                StatusCode::NOT_IMPLEMENTED,
+                "that PC runs an older DocLink without this feature — update it".to_string(),
             ),
             ProxyError::Upstream(m) => (StatusCode::BAD_GATEWAY, m),
         };
@@ -111,6 +118,13 @@ pub async fn list(
 }
 
 /// Signed filename search against one peer.
+/// True when a peer answered an unknown route: 404 with an empty body.
+/// Known routes always return JSON errors, so this reliably marks
+/// pre-feature DocLink builds.
+fn is_unsupported_route(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::NOT_FOUND && body.trim().is_empty()
+}
+
 pub async fn search(
     s: &AppState,
     node_id: &str,
@@ -130,11 +144,75 @@ pub async fn search(
         .text()
         .await
         .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    if is_unsupported_route(status, &body) {
+        return Err(ProxyError::UnsupportedPeer);
+    }
     if !status.is_success() {
         return Err(ProxyError::Upstream(upstream_message(status, &body)));
     }
     serde_json::from_str(&body)
         .map_err(|e| ProxyError::Upstream(format!("invalid peer response: {e}")))
+}
+
+/// Best-effort filename search against peers that predate /v1/search:
+/// walk their share through the plain list endpoint and filter locally.
+/// Budgeted so old peers with huge shares don't stall the UI.
+pub async fn search_fallback(
+    s: &AppState,
+    node_id: &str,
+    query: &str,
+) -> Result<doclink_core::protocol::SearchResponse, ProxyError> {
+    const MAX_VISITS: usize = 1500;
+    let q_lower = query.to_lowercase();
+    let mut results = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(String::new());
+    let mut visited = 0usize;
+    let mut truncated = false;
+
+    // Root listing failure is meaningful (offline/expired) — surface it.
+    let root_json = list(s, node_id, "").await?;
+    let first: doclink_core::protocol::ListResponse =
+        serde_json::from_value(root_json)
+            .map_err(|e| ProxyError::Upstream(format!("bad list response: {e}")))?;
+    for e in &first.entries {
+        visited += 1;
+        if e.kind == doclink_core::protocol::EntryKind::Dir {
+            queue.push_back(e.path.clone());
+        } else if e.name.to_lowercase().contains(&q_lower) {
+            results.push(e.clone());
+        }
+    }
+    while let Some(dir) = queue.pop_front() {
+        if visited >= MAX_VISITS || results.len() >= 200 {
+            truncated = true;
+            break;
+        }
+        if let Ok(json) = list(s, node_id, &dir).await {
+            if let Ok(lr) = serde_json::from_value::<
+                doclink_core::protocol::ListResponse,
+            >(json)
+            {
+                for e in lr.entries {
+                    visited += 1;
+                    if visited > MAX_VISITS {
+                        truncated = true;
+                        break;
+                    }
+                    if e.kind == doclink_core::protocol::EntryKind::Dir {
+                        queue.push_back(e.path);
+                    } else if e.name.to_lowercase().contains(&q_lower) {
+                        results.push(e);
+                    }
+                }
+            }
+        }
+    }
+    Ok(doclink_core::protocol::SearchResponse {
+        query: query.to_string(),
+        truncated,
+        results,
+    })
 }
 
 pub async fn file(
@@ -210,4 +288,27 @@ pub async fn file(
     let mut response = (out, body).into_response();
     *response.status_mut() = status_out;
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::StatusCode;
+
+    #[test]
+    fn unsupported_route_detection() {
+        assert!(is_unsupported_route(StatusCode::NOT_FOUND, ""));
+        assert!(is_unsupported_route(StatusCode::NOT_FOUND, "   "));
+        assert!(!is_unsupported_route(StatusCode::NOT_FOUND, "not found"));
+        assert!(!is_unsupported_route(StatusCode::NOT_FOUND, "{}"));
+        assert!(!is_unsupported_route(StatusCode::NOT_FOUND, "<html>404</html>"));
+        assert!(!is_unsupported_route(StatusCode::BAD_GATEWAY, ""));
+        assert!(!is_unsupported_route(StatusCode::OK, ""));
+    }
+
+    #[test]
+    fn unsupported_peer_variant_is_501() {
+        let resp: axum::response::Response = ProxyError::UnsupportedPeer.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
 }

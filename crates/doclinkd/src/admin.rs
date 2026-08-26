@@ -1277,13 +1277,39 @@ async fn search_all(
                     truncated: r.truncated,
                     results: r.results,
                 },
+                Err(ProxyError::UnsupportedPeer) => {
+                    match proxy::search_fallback(&s2, &node_id, &query).await {
+                        Ok(r) => PeerSearchSlice {
+                            node_id,
+                            alias,
+                            online: true,
+                            error: Some(
+                                "older DocLink — best-effort results".into(),
+                            ),
+                            truncated: r.truncated,
+                            results: r.results,
+                        },
+                        Err(_) => PeerSearchSlice {
+                            node_id,
+                            alias,
+                            online: false,
+                            error: Some(
+                                "older DocLink without search — update it"
+                                    .into(),
+                            ),
+                            truncated: false,
+                            results: Vec::new(),
+                        },
+                    }
+                }
                 Err(e) => PeerSearchSlice {
                     node_id,
                     alias,
                     online: false,
                     error: Some(match e {
-                        crate::proxy::ProxyError::UnknownPeer => "offline".to_string(),
+                        ProxyError::UnknownPeer => "offline".to_string(),
                         ProxyError::Upstream(m) => m,
+                        _ => "unknown error".to_string(),
                     }),
                     truncated: false,
                     results: Vec::new(),
@@ -1404,7 +1430,7 @@ async fn browse_raw(
 
 #[cfg(test)]
 mod tests {
-    use super::{authority_allowed, preview_mime};
+    use super::{authority_allowed, preview_mime, PeerSearchSlice};
 
     #[test]
     fn accepts_local_hosts_on_admin_port() {
@@ -1538,6 +1564,23 @@ mod tests {
             // No listing for the covering parent -> scope untouched.
             assert!(subtract_from_scope(&["docs".into()], "docs/a.txt", |_| None).is_none());
         }
+    }
+
+    #[test]
+    fn unsupported_peer_slice_formatting() {
+        // Simulates what renderSearchResults shows for old-version peers.
+        let slice = PeerSearchSlice {
+            node_id: "abc123".into(),
+            alias: "Old PC".into(),
+            online: true,
+            error: Some("older DocLink — best-effort results".into()),
+            truncated: false,
+            results: Vec::new(),
+        };
+        let json = serde_json::to_value(&slice).unwrap();
+        assert_eq!(json["alias"], "Old PC");
+        assert_eq!(json["error"], "older DocLink — best-effort results");
+        assert_eq!(json["results"], serde_json::json!([]));
     }
 }
 
