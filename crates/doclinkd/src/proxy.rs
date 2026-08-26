@@ -110,6 +110,33 @@ pub async fn list(
         .map_err(|e| ProxyError::Upstream(format!("invalid peer response: {e}")))
 }
 
+/// Signed filename search against one peer.
+pub async fn search(
+    s: &AppState,
+    node_id: &str,
+    query: &str,
+) -> Result<doclink_core::protocol::SearchResponse, ProxyError> {
+    let target = peer_lookup(s, node_id)?;
+    let path_q = format!("/v1/search?q={}", urlencoding::encode(query));
+    let resp = signed_get(s, &target.base, &path_q)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    crate::peer::check(&resp, Some(&target.fingerprint))
+        .map_err(ProxyError::Upstream)?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    if !status.is_success() {
+        return Err(ProxyError::Upstream(upstream_message(status, &body)));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| ProxyError::Upstream(format!("invalid peer response: {e}")))
+}
+
 pub async fn file(
     s: &AppState,
     node_id: &str,

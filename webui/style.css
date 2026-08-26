@@ -458,3 +458,23 @@ button.primary {
 }
 #listing[class*="view-icons"] .iacts a,
 #listing[class*="view-icons"] .iacts button { font-size: 10.5px; padding: 1px 5px; }
+
+/* ---- global search ---- */
+#global-search {
+  margin-right: auto;
+  width: 240px;
+  background: var(--hover, #262b36);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 8px;
+}
+#global-search:focus { outline: none; border-color: #0078d4; }
+.search-group {
+  padding: 8px 12px 4px;
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em;
+  border-bottom: 1px solid var(--line);
+}
+.item .search-path { overflow: hidden; text-overflow: ellipsis; }

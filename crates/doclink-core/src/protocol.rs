@@ -84,6 +84,17 @@ pub struct ListResponse {
     pub entries: Vec<DirEntry>,
 }
 
+/// GET /v1/search response: flat, scope-filtered filename matches.
+/// `truncated` is set when the visit budget ran out before the whole
+/// granted scope was walked — the client should tell the user the list
+/// may be incomplete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResponse {
+    pub query: String,
+    pub truncated: bool,
+    pub results: Vec<DirEntry>,
+}
+
 /// A peer as tracked by the discovery registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {

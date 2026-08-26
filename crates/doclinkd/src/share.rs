@@ -99,6 +99,40 @@ impl ShareRoot {
         Ok(entries)
     }
 
+    /// Blocking twin of [`list`] for internal walkers that run inside
+    /// `spawn_blocking` (the scoped search). Same resolution safety.
+    pub fn list_sync(&self, rel: &str) -> Result<Vec<DirEntry>, ShareError> {
+        let dir = self.resolve(rel)?;
+        let mut entries = Vec::new();
+        for item in std::fs::read_dir(dir)? {
+            let item = item?;
+            let meta = item.metadata()?;
+            let name = item.file_name().to_string_lossy().into_owned();
+            let path = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            entries.push(DirEntry {
+                name,
+                path,
+                kind: if meta.is_dir() {
+                    EntryKind::Dir
+                } else {
+                    EntryKind::File
+                },
+                size: meta.len(),
+                modified_unix: meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs()),
+            });
+        }
+        entries.sort_by_key(|e| (e.kind == EntryKind::File, e.name.to_lowercase()));
+        Ok(entries)
+    }
+
     /// Owner-side management: delete a file or folder from the share.
     /// The share root itself cannot be deleted.
     pub async fn delete(&self, rel: &str) -> Result<(), ShareError> {

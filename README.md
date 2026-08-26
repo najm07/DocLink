@@ -92,5 +92,5 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.3, TLS
 
 - [ ] Print-on-host through PrintLink interop
 - [ ] WebDAV facade (mount a peer's share as a drive letter)
-- [ ] Search across all granted peers
+- [x] Search across all granted peers — toolbar box fans out to every approved, reachable PC; results grouped per PC with View/Download/Print, scope-enforced
 - [ ] `Inbox/` write support (upload into a peer's drop folder)

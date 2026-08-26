@@ -152,8 +152,64 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/info", get(info))
         .route("/v1/list", get(list))
         .route("/v1/file", get(file))
+        .route("/v1/search", get(search))
         .merge(pair_routes)
         .with_state(state)
+}
+
+/// Search limits: entries *visited* are bounded so a huge share cannot
+/// make the walk unbounded, and results are capped for payload size.
+const SEARCH_VISIT_BUDGET: usize = 20_000;
+const SEARCH_MAX_RESULTS: usize = 200;
+
+fn matches_query(name: &str, q_lower: &str) -> bool {
+    name.to_lowercase().contains(q_lower)
+}
+
+/// Walk the caller's granted scope looking for filename matches.
+///
+/// `roots` is empty for full-access grants (walk from the share root) or
+/// holds each granted subtree. Returns `(results, truncated)`; entries
+/// already carry paths relative to the share root via ShareRoot::list.
+pub fn search_scope(
+    share: &crate::share::ShareRoot,
+    roots: &[String],
+    query: &str,
+) -> (Vec<doclink_core::protocol::DirEntry>, bool) {
+    let q_lower = query.trim().to_lowercase();
+    let mut out = Vec::new();
+    let mut truncated = false;
+    let mut visited: usize = 0;
+    // Empty roots = full access: walk from the share root.
+    let mut stack: Vec<String> = if roots.is_empty() {
+        vec![String::new()]
+    } else {
+        roots.iter().rev().cloned().collect()
+    };
+
+    while let Some(dir) = stack.pop() {
+        if visited >= SEARCH_VISIT_BUDGET || out.len() >= SEARCH_MAX_RESULTS {
+            truncated = true;
+            break;
+        }
+        let entries = match share.list_sync(&dir) {
+            Ok(es) => es,
+            Err(_) => continue, // unreadable subtree: skip, don't abort
+        };
+        for e in entries {
+            visited += 1;
+            if visited > SEARCH_VISIT_BUDGET {
+                truncated = true;
+                break;
+            }
+            if e.kind == doclink_core::protocol::EntryKind::Dir {
+                stack.push(e.path.clone());
+            } else if matches_query(&e.name, &q_lower) && out.len() < SEARCH_MAX_RESULTS {
+                out.push(e);
+            }
+        }
+    }
+    (out, truncated)
 }
 
 async fn rate_limit_pair(
@@ -399,6 +455,86 @@ async fn file(
             .into_response());
     }
     Ok((out, axum::body::Body::from_stream(stream)).into_response())
+}
+
+/// Scoped recursive filename search over the caller's granted view.
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+async fn search(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SearchQuery>,
+) -> Result<Json<doclink_core::protocol::SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use doclink_core::protocol::{DirEntry, EntryKind};
+    let path_q = format!("/v1/search?q={}", urlencoding::encode(&q.q));
+    let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)
+        .map_err(auth::AuthError::into_response)?;
+    let query = q.q.trim().to_string();
+    if query.chars().count() < 2 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search term must be at least 2 characters",
+        ));
+    }
+    let q_lower = query.to_lowercase();
+
+    // Walk targets: full share for full access; otherwise each granted
+    // path. Granted *files* can't be listed as directories — they are
+    // matched directly by their own name instead.
+    let mut roots: Vec<String> = Vec::new();
+    let mut direct: Vec<DirEntry> = Vec::new();
+    if grant.paths.is_empty() {
+        roots.push(String::new());
+    } else {
+        for p in &grant.paths {
+            roots.push(p.clone());
+            if let Ok(full) = s.inner.share.resolve(p) {
+                if full.is_file() {
+                    let name = p.rsplit('/').next().unwrap_or(p);
+                    if matches_query(name, &q_lower) {
+                        let md = std::fs::metadata(&full).ok();
+                        direct.push(DirEntry {
+                            name: name.to_string(),
+                            path: p.clone(),
+                            kind: EntryKind::File,
+                            size: md.as_ref().map(|m| m.len()).unwrap_or(0),
+                            modified_unix: md.and_then(|m| m.modified().ok())
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs()),
+                        });
+                    }
+                }
+            }
+        }
+        roots.sort();
+        roots.dedup();
+    }
+
+    let share = s.inner.share.clone();
+    let query_for_task = query.clone();
+    let (mut results, mut truncated) = tokio::task::spawn_blocking(move || {
+        search_scope(&share, &roots, &query_for_task)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("search task: {e}")))?;
+
+    // Granted files found by name go first, then the subtree hits.
+    let mut all = direct;
+    all.append(&mut results);
+    if truncated {
+        // direct hits are exact-name matches on explicitly granted files;
+        // keep them even when the walk budget ran out.
+        truncated = false;
+    }
+
+    Ok(Json(doclink_core::protocol::SearchResponse {
+        query,
+        truncated,
+        results: all,
+    }))
 }
 
 // ---- Pairing ----
@@ -881,6 +1017,66 @@ mod tests {
         }
         let d = pairing.decisions.lock().unwrap();
         assert_eq!(d.len(), MAX_DECISIONS);
+    }
+
+    mod search_scope_tests {
+        use super::search_scope;
+        use crate::share::ShareRoot;
+        use std::path::Path;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+
+        fn cleanup(dir: &Path) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        fn fixture() -> (ShareRoot, std::path::PathBuf) {
+            let id = NEXT.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir()
+                .join(format!("doclink-search-{}-{}", std::process::id(), id));
+            std::fs::create_dir_all(dir.join("docs/deep")).unwrap();
+            std::fs::create_dir_all(dir.join("media")).unwrap();
+            std::fs::write(dir.join("Invoice-jan.txt"), "a").unwrap();
+            std::fs::write(dir.join("docs/invoice-feb.txt"), "b").unwrap();
+            std::fs::write(dir.join("docs/deep/INVOICE Q1.pdf"), "c").unwrap();
+            std::fs::write(dir.join("media/song.mp3"), "d").unwrap();
+            (ShareRoot::new(&dir).unwrap(), dir)
+        }
+
+        #[test]
+        fn full_access_finds_matches_case_insensitive_across_depths() {
+            let (root, tmp) = fixture();
+            let (res, trunc) = search_scope(&root, &[], "invoice");
+            assert!(!trunc);
+            let mut paths: Vec<String> = res.iter().map(|e| e.path.clone()).collect();
+            paths.sort();
+            assert_eq!(
+                paths,
+                vec![
+                    "Invoice-jan.txt",
+                    "docs/deep/INVOICE Q1.pdf",
+                    "docs/invoice-feb.txt"
+                ]
+            );
+            cleanup(&tmp);
+        }
+
+        #[test]
+        fn scoped_grant_only_walks_its_subtree() {
+            let (root, tmp) = fixture();
+            let (res, _) = search_scope(&root, &["docs".to_string()], "invoice");
+            assert_eq!(res.len(), 2); // jan is outside the grant
+            cleanup(&tmp);
+        }
+
+        #[test]
+        fn no_match_yields_empty_not_truncated() {
+            let (root, tmp) = fixture();
+            let (res, trunc) = search_scope(&root, &[], "zzzz");
+            assert!(res.is_empty() && !trunc);
+            cleanup(&tmp);
+        }
     }
 
     #[test]

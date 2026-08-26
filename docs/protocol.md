@@ -128,6 +128,7 @@ Verification rules (publisher MUST enforce):
 |---|---|---|
 | `GET /v1/info` | none | `NodeInfo` (needed to verify pairing targets) |
 | `GET /v1/list?path=<rel>` | required | `ListResponse`, scope-filtered |
+| `GET /v1/search?q=<term>` | required | `SearchResponse`: case-insensitive filename matches across the caller's granted scope (recursive, visit-budget 20k, max 200 hits, `truncated` flag) |
 | `GET /v1/file?path=<rel>` | required | file bytes, streamed; single `Range` supported (`206` + `Content-Range`, `416` when unsatisfiable), `Content-Disposition: attachment` |
 | `POST /v1/pair/request` | self-signed body | `PairStatusResponse` |
 | `POST /v1/pair/decision` | self-signed body **from a known grantor** | `204`; decisions from unpaired keys are rejected (`403`) |

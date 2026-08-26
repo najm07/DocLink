@@ -129,6 +129,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/events", get(events_since))
         .route("/v1/admin/settings", get(get_settings).put(put_settings))
         .route("/v1/admin/print/{node_id}", post(print_remote))
+        .route("/v1/admin/search-all", get(search_all))
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
         .route("/v1/admin/browse/{node_id}/raw", get(browse_raw))
@@ -948,6 +949,11 @@ struct BrowseQuery {
     path: String,
 }
 
+#[derive(Deserialize)]
+struct SearchAllQuery {
+    q: String,
+}
+
 async fn myshare_list(
     State(s): State<AppState>,
     Query(q): Query<BrowseQuery>,
@@ -1212,6 +1218,98 @@ async fn print_remote(
 
     tracing::info!(file = %safe_name, peer = %node_id, "sent to printer");
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Global search across approved peers ----
+
+/// One peer's slice of a global search.
+#[derive(serde::Serialize)]
+struct PeerSearchSlice {
+    node_id: String,
+    alias: String,
+    online: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    truncated: bool,
+    results: Vec<doclink_core::protocol::DirEntry>,
+}
+
+/// Fan a filename query out to every approved contact that is currently
+/// reachable, in parallel. Offline peers are listed with an `error` so
+/// the UI can say "offline" instead of silently omitting them.
+async fn search_all(
+    State(s): State<AppState>,
+    Query(q): Query<SearchAllQuery>,
+) -> Result<Json<Vec<PeerSearchSlice>>, (StatusCode, Json<ErrorResponse>)> {
+    let query = q.q.trim().to_string();
+    if query.chars().count() < 2 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search term must be at least 2 characters",
+        ));
+    }
+
+    // Approved contacts only. Reachability shows up per-slice: peers we
+    // can't connect to come back with error "offline".
+    let targets: Vec<(String, String)> = {
+        let contacts = s.inner.contacts.lock().unwrap().read().clone();
+        contacts
+            .contacts
+            .iter()
+            .filter(|c| c.status == "approved")
+            .map(|c| (c.node_id.clone(), c.alias.clone()))
+            .collect()
+    };
+
+    let mut set = tokio::task::JoinSet::new();
+    for (node_id, alias) in targets.iter() {
+        let s2 = s.clone();
+        let node_id = node_id.clone();
+        let alias = alias.clone();
+        let query = query.clone();
+        set.spawn(async move {
+            match proxy::search(&s2, &node_id, &query).await {
+                Ok(r) => PeerSearchSlice {
+                    node_id,
+                    alias,
+                    online: true,
+                    error: None,
+                    truncated: r.truncated,
+                    results: r.results,
+                },
+                Err(e) => PeerSearchSlice {
+                    node_id,
+                    alias,
+                    online: false,
+                    error: Some(match e {
+                        crate::proxy::ProxyError::UnknownPeer => "offline".to_string(),
+                        ProxyError::Upstream(m) => m,
+                    }),
+                    truncated: false,
+                    results: Vec::new(),
+                },
+            }
+        });
+    }
+    if targets.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let mut slices: Vec<PeerSearchSlice> = Vec::with_capacity(targets.len());
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(slice) => slices.push(slice),
+            Err(e) => tracing::warn!(%e, "search fan-out task failed"),
+        }
+    }
+    // Stable order: alias, then most results first.
+    slices.sort_by(|a, b| {
+        b.results
+            .len()
+            .cmp(&a.results.len())
+            .then_with(|| a.alias.to_lowercase().cmp(&b.alias.to_lowercase()))
+    });
+    Ok(Json(slices))
 }
 
 // ---- Browse proxy ----

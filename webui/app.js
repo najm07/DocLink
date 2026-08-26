@@ -1003,6 +1003,123 @@ function initFileView() {
     };
   });
   applyFileView(localStorage.getItem("doclink.fileView") || "list");
+
+  // Global search: debounced typing, Enter for immediate.
+  const search = document.getElementById("global-search");
+  if (search) {
+    search.addEventListener("input", () => {
+      const q = search.value.trim();
+      clearTimeout(searchTimer);
+      if (q.length < 2) return;
+      searchTimer = setTimeout(() => runGlobalSearch(q), 350);
+    });
+    search.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        clearTimeout(searchTimer);
+        const q = search.value.trim();
+        if (q.length >= 2) runGlobalSearch(q);
+      }
+      if (e.key === "Escape") {
+        search.value = "";
+        loadListing();
+      }
+    });
+  }
+}
+
+// ---- global search across approved peers ----
+
+let searchTimer = null;
+
+function runGlobalSearch(q) {
+  const grid = document.getElementById("listing");
+  const head = document.querySelector(".grid-head");
+  if (head) head.style.display = "none";
+  grid.className = "grid";
+  grid.innerHTML =
+    '<div class="search-group"><span class="name">Searching all PCs for \u201C' +
+    escapeHtml(q) + '\u201D…</span></div>';
+  const crumb = document.getElementById("breadcrumb");
+  crumb.innerHTML =
+    'Search: \u201C' + escapeHtml(q) + '\u201D &nbsp;<a href="#" id="clear-search">✕ clear</a>';
+  crumb.querySelector("#clear-search").onclick = (e) => {
+    e.preventDefault();
+    loadListing();
+  };
+
+  api("/v1/admin/search-all?q=" + encodeURIComponent(q))
+    .then(renderSearchResults)
+    .catch((err) => {
+      grid.innerHTML =
+        '<div class="search-group"><span class="name">Search failed: ' +
+        escapeHtml(err.message) + "</span></div>";
+    });
+}
+
+function renderSearchResults(slices) {
+  const grid = document.getElementById("listing");
+  grid.innerHTML = "";
+  let total = 0;
+  let anyOffline = false;
+
+  for (const slice of slices) {
+    const group = document.createElement("div");
+    group.className = "search-group";
+    const label = slice.error
+      ? escapeHtml(slice.alias) + " — " + (slice.error === "offline" ? "offline" : escapeHtml(slice.error))
+      : escapeHtml(slice.alias) + " — " + slice.results.length + " match" + (slice.results.length === 1 ? "" : "es") +
+        (slice.truncated ? " (may be incomplete)" : "");
+    group.innerHTML = '<span class="name">' + label + "</span>";
+    if (slice.error && slice.error === "offline") anyOffline = true;
+    grid.appendChild(group);
+
+    if (slice.error || !slice.results.length) continue;
+    total += slice.results.length;
+
+    for (const e of slice.results) {
+      const row = document.createElement("div");
+      row.className = "item" + (e.kind === "dir" ? " dir" : "");
+      row.innerHTML =
+        '<span class="iname">' + fileGlyph(e.name, e.kind) + "<span></span></span>" +
+        '<span class="isize">' + fmtSize(e.size) + '</span>' +
+        '<span class="itime search-path"></span>' +
+        '<span class="iacts"></span>';
+      row.querySelector(".iname span").textContent = e.name;
+      row.querySelector(".search-path").textContent = e.path;
+
+      if (e.kind === "dir") {
+        row.onclick = () => {
+          state.selected = slice.node_id;
+          state.path = e.path;
+          loadListing();
+        };
+      }
+      const acts = row.querySelector(".iacts");
+      const vw = document.createElement("button");
+      vw.type = "button";
+      vw.textContent = "View";
+      if (e.kind === "file") vw.onclick = () => openViewer(slice.node_id, e.path, e.size);
+      else vw.disabled = true;
+      acts.appendChild(vw);
+      if (e.kind === "file") {
+        const dl = document.createElement("a");
+        dl.textContent = "Download";
+        dl.href = "/v1/admin/browse/" + slice.node_id + "/file?path=" + encodeURIComponent(e.path);
+        acts.appendChild(dl);
+        const pr = document.createElement("button");
+        pr.type = "button";
+        pr.textContent = "Print";
+        pr.onclick = async () => {
+          try { await api("/v1/admin/print/" + slice.node_id + "?path=" + encodeURIComponent(e.path), { method: "POST" }); } catch (_) {}
+        };
+        acts.appendChild(pr);
+      }
+      grid.appendChild(row);
+    }
+  }
+
+  document.getElementById("sb-mid").textContent =
+    total + " result" + (total === 1 ? "" : "s") + (anyOffline ? " · some PCs offline" : "");
 }
 
 document.getElementById("btn-add").onclick = () => {
