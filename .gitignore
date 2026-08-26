@@ -17,3 +17,5 @@
 /build.log
 # WiX toolset (downloaded by msi.ps1)
 /tools/
+/doclink-admin.port
+/doclink-events.cursor
