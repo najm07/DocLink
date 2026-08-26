@@ -425,7 +425,9 @@ button.primary {
 .viewbar button.active { color: #4fc1ff; background: var(--hover); }
 .viewbar svg { width: 13px; height: 13px; fill: currentColor; }
 
-/* icon modes reuse the same .item markup, reflowed as cards */
+/* icon modes reuse the same .item markup, reflowed as cards.
+   Cards stretch to the tallest sibling so action rows line up across
+   each visual row; corners stay square to match list-view hover. */
 #listing.view-icons-sm, #listing.view-icons-lg {
   display: flex; flex-wrap: wrap; align-content: flex-start;
   gap: 6px; padding: 10px;
@@ -433,8 +435,10 @@ button.primary {
 #listing.view-icons-sm .item, #listing.view-icons-lg .item {
   grid-template-columns: none;
   display: flex; flex-direction: column; align-items: center;
-  text-align: center; height: auto; border-radius: 8px; padding: 10px 6px 8px;
+  text-align: center; height: auto; border-radius: 0; padding: 10px 6px 8px;
 }
+#listing.view-icons-sm .item { min-height: 104px; width: 118px; }
+#listing.view-icons-lg .item { min-height: 138px; width: 146px; }
 #listing.view-icons-sm .iname, #listing.view-icons-lg .iname {
   flex-direction: column; gap: 7px; width: 100%;
 }
@@ -449,7 +453,8 @@ button.primary {
 #listing[class*="view-icons"] .isize,
 #listing[class*="view-icons"] .itime { display: none; }
 #listing[class*="view-icons"] .iacts {
-  opacity: 1; justify-content: center; flex-wrap: wrap; gap: 3px; margin-top: 6px;
+  opacity: 1; justify-content: center; flex-wrap: wrap; gap: 3px;
+  margin-top: auto; padding-top: 6px;
 }
 #listing[class*="view-icons"] .iacts a,
 #listing[class*="view-icons"] .iacts button { font-size: 10.5px; padding: 1px 5px; }

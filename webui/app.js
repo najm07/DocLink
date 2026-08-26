@@ -552,6 +552,48 @@ function fileIcon(kind) {
   return '<svg class="fico file" viewBox="0 0 16 16"><path d="M4 1h6l4 4v10H4z" fill="none" stroke="currentColor"/><path d="M10 1v4h4" fill="none" stroke="currentColor"/></svg>';
 }
 
+// Type-aware glyph for icon views: same visual language as fileIcon
+// (amber filled folder, stroked gray documents), but per file category.
+const S = 'fill="none" stroke="currentColor" stroke-width="1.2"';
+const Glyph = {
+  folder: '<svg class="fico" viewBox="0 0 16 16"><path d="M1 3h5l1 2h8v8H1z"/></svg>',
+  file: '<svg class="fico file" viewBox="0 0 16 16"><path d="M4 1h6l4 4v10H4z" fill="none" stroke="currentColor"/><path d="M10 1v4h4" fill="none" stroke="currentColor"/></svg>',
+  image: `<svg class="fico file" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1" ${S}/><circle cx="5.5" cy="6.2" r="1.1" ${S}/><path d="M4 11.5l3-3 2.2 2.2L11.5 8.5l2.5 2.5" ${S}/></svg>`,
+  audio: `<svg class="fico file" viewBox="0 0 16 16"><path d="M9.5 3v6.8a2.3 2.3 0 1 1-1.4-2.1" ${S}/><path d="M9.5 3l3.8-.9v3l-3.8.9" ${S}/></svg>`,
+  video: `<svg class="fico file" viewBox="0 0 16 16"><rect x="2" y="4" width="12" height="9" rx="1" ${S}/><path d="M7 7l3.5 1.8L7 10.6z" fill="currentColor" stroke="none"/></svg>`,
+  pdf: `<svg class="fico file" viewBox="0 0 16 16"><path d="M4 1h6l4 4v10H4z" ${S}/><path d="M10 1v4h4" ${S}/><path d="M6.2 9h4.6M6.2 11.5h4.6" ${S}/><text x="6" y="14.4" font-size="3.4" fill="currentColor" stroke="none" font-family="Segoe UI">A</text></svg>`,
+  sheet: `<svg class="fico file" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="11.5" ${S}/><path d="M2 6h12M2 9.5h12M6 2.5V14M10 2.5V14" ${S}/></svg>`,
+  slides: `<svg class="fico file" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="8" rx="1" ${S}/><path d="M8 11v2.5M5.5 13.5h5" ${S}/></svg>`,
+  archive: `<svg class="fico file" viewBox="0 0 16 16"><rect x="3" y="2" width="10" height="12" ${S}/><path d="M8 2v4.5M6.4 4.4h3.2" ${S}/></svg>`,
+  code: `<svg class="fico file" viewBox="0 0 16 16"><path d="M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5" ${S}/></svg>`,
+  doc: `<svg class="fico file" viewBox="0 0 16 16"><path d="M4 1h6l4 4v10H4z" ${S}/><path d="M10 1v4h4" ${S}/><path d="M6 8h5M6 10.5h5M6 13h3.5" ${S}/></svg>`,
+};
+
+const EXT_GLYPH = {
+  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image",
+  bmp: "image", ico: "image", svg: "image",
+  mp4: "video", m4v: "video", webm: "video", mov: "video", mkv: "video",
+  mp3: "audio", wav: "audio", ogg: "audio", oga: "audio", m4a: "audio",
+  flac: "audio",
+  pdf: "pdf",
+  xlsx: "sheet", xlsm: "sheet", xls: "sheet", csv: "sheet",
+  pptx: "slides", ppt: "slides",
+  zip: "archive", rar: "archive", "7z": "archive",
+  js: "code", mjs: "code", ts: "code", rs: "code", py: "code", rb: "code",
+  sh: "code", bat: "code", ps1: "code", c: "code", h: "code", cpp: "code",
+  hpp: "code", cs: "code", java: "code",
+  exe: "doc", msi: "doc",
+};
+
+function fileGlyph(name, kind) {
+  if (kind === "dir") return Glyph.folder;
+  const e = extOf(name);
+  if (EXT_GLYPH[e]) return Glyph[EXT_GLYPH[e]];
+  if (VIEWABLE_TEXT.includes(e)) return Glyph.doc;
+  if (e === "") return Glyph.doc;
+  return Glyph.file;
+}
+
 async function loadListing() {
   renderBreadcrumb();
   const grid = document.getElementById("listing");
@@ -573,7 +615,7 @@ async function loadListing() {
       const row = document.createElement("div");
       row.className = "item" + (e.kind === "dir" ? " dir" : "");
       row.innerHTML =
-        '<span class="iname">' + fileIcon(e.kind) + '<span></span></span>' +
+        '<span class="iname">' + fileGlyph(e.name, e.kind) + '<span></span></span>' +
         '<span class="isize">' + (e.kind === "file" ? fmtSize(e.size) : "") + '</span>' +
         '<span class="itime">' + fmtTime(e.modified_unix) + '</span>' +
         '<span class="iacts"></span>';
