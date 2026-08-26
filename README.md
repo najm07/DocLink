@@ -69,7 +69,7 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.3, TLS
 - [x] Streaming downloads + `Range` support (no whole-file buffering)
 - [x] Print button: download to temp, then Windows shell `print` verb via windows-rs (`ShellExecuteEx`)
 - [x] Toast notifications (pair request received, grant expiring soon)
-- [x] In-app file viewer: preview PDFs, images, audio/video and text/code before downloading (Office formats offer download)
+- [x] In-app file viewer: preview PDFs, images, audio/video, text/code **and Office documents** (.docx via docx-preview, .xlsx/.xls via SheetJS - vendored, offline) before downloading
 - [x] Graceful shutdown (tray Quit / Ctrl-C; admin stop endpoint)
 - [x] Contact status refresh: pending contacts re-poll the grantor's `/v1/pair/status`, and peers stay live via TCP keepalive (mDNS re-announcements alone don't refresh liveness)
 - [x] Tray icon so the daemon is visible/manageable without the window (Open / Quit)
