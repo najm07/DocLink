@@ -934,6 +934,34 @@ document.querySelectorAll(".act").forEach((b) => {
   b.onclick = () => setView(b.dataset.view);
 });
 
+// ---- view mode switching (list / small icons / large icons) ----
+
+const FILE_VIEWS = ["list", "icons-sm", "icons-lg"];
+
+function applyFileView(v) {
+  if (!FILE_VIEWS.includes(v)) v = "list";
+  const grid = document.getElementById("listing");
+  if (!grid) return;
+  grid.className = "grid" + (v === "list" ? "" : " view-" + v);
+  const head = document.querySelector(".grid-head");
+  if (head) head.style.display = v === "list" ? "" : "none";
+  document.querySelectorAll("#view-switch button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.v === v);
+  });
+}
+
+function initFileView() {
+  const bar = document.getElementById("view-switch");
+  if (!bar) return;
+  bar.querySelectorAll("button").forEach((b) => {
+    b.onclick = () => {
+      localStorage.setItem("doclink.fileView", b.dataset.v);
+      applyFileView(b.dataset.v);
+    };
+  });
+  applyFileView(localStorage.getItem("doclink.fileView") || "list");
+}
+
 document.getElementById("btn-add").onclick = () => {
   const form = document.getElementById("add-form");
   form.hidden = !form.hidden;
@@ -970,6 +998,7 @@ loadContacts();
 loadRequests();
 loadGrants();
 initNetView();
+initFileView();
 setInterval(() => {
   loadContacts();
   loadRequests();
