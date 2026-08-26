@@ -545,28 +545,25 @@ function renderBreadcrumb() {
   }
 }
 
-function fileIcon(kind) {
-  if (kind === "dir") {
-    return '<svg class="fico" viewBox="0 0 16 16"><path d="M1 3h5l1 2h8v8H1z"/></svg>';
-  }
-  return '<svg class="fico file" viewBox="0 0 16 16"><path d="M4 1h6l4 4v10H4z" fill="none" stroke="currentColor"/><path d="M10 1v4h4" fill="none" stroke="currentColor"/></svg>';
-}
-
-// Type-aware glyph for icon views: same visual language as fileIcon
-// (amber filled folder, stroked gray documents), but per file category.
-const S = 'fill="none" stroke="currentColor" stroke-width="1.2"';
+// Colorful per-type tiles: rounded square in a category color with a
+// white pictogram, so every type is distinct at a glance. The folder
+// keeps its classic amber shape.
+const TILE = (color, glyph) =>
+  `<svg class="fico" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="3" fill="${color}"/>${glyph}</svg>`;
+const W = 'stroke="#fff" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"';
 const Glyph = {
   folder: '<svg class="fico" viewBox="0 0 16 16"><path d="M1 3h5l1 2h8v8H1z"/></svg>',
-  file: '<svg class="fico file" viewBox="0 0 16 16"><path d="M4 1h6l4 4v10H4z" fill="none" stroke="currentColor"/><path d="M10 1v4h4" fill="none" stroke="currentColor"/></svg>',
-  image: `<svg class="fico file" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1" ${S}/><circle cx="5.5" cy="6.2" r="1.1" ${S}/><path d="M4 11.5l3-3 2.2 2.2L11.5 8.5l2.5 2.5" ${S}/></svg>`,
-  audio: `<svg class="fico file" viewBox="0 0 16 16"><path d="M9.5 3v6.8a2.3 2.3 0 1 1-1.4-2.1" ${S}/><path d="M9.5 3l3.8-.9v3l-3.8.9" ${S}/></svg>`,
-  video: `<svg class="fico file" viewBox="0 0 16 16"><rect x="2" y="4" width="12" height="9" rx="1" ${S}/><path d="M7 7l3.5 1.8L7 10.6z" fill="currentColor" stroke="none"/></svg>`,
-  pdf: `<svg class="fico file" viewBox="0 0 16 16"><path d="M4 1h6l4 4v10H4z" ${S}/><path d="M10 1v4h4" ${S}/><path d="M6.2 9h4.6M6.2 11.5h4.6" ${S}/><text x="6" y="14.4" font-size="3.4" fill="currentColor" stroke="none" font-family="Segoe UI">A</text></svg>`,
-  sheet: `<svg class="fico file" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="11.5" ${S}/><path d="M2 6h12M2 9.5h12M6 2.5V14M10 2.5V14" ${S}/></svg>`,
-  slides: `<svg class="fico file" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="8" rx="1" ${S}/><path d="M8 11v2.5M5.5 13.5h5" ${S}/></svg>`,
-  archive: `<svg class="fico file" viewBox="0 0 16 16"><rect x="3" y="2" width="10" height="12" ${S}/><path d="M8 2v4.5M6.4 4.4h3.2" ${S}/></svg>`,
-  code: `<svg class="fico file" viewBox="0 0 16 16"><path d="M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5" ${S}/></svg>`,
-  doc: `<svg class="fico file" viewBox="0 0 16 16"><path d="M4 1h6l4 4v10H4z" ${S}/><path d="M10 1v4h4" ${S}/><path d="M6 8h5M6 10.5h5M6 13h3.5" ${S}/></svg>`,
+  file: TILE("#78909c", `<path d="M5.5 3.5h3.2L11.5 6v6.5h-6z" ${W}/><path d="M8.7 3.5V6h2.8" ${W}/>`),
+  image: TILE("#00897b", `<circle cx="6.2" cy="6" r="1.5" fill="#fff"/><path d="M4 11l2.8-2.8 1.9 1.9L11 8l2.3 2.3" ${W}/>`),
+  audio: TILE("#fb8c00", `<path d="M10 4.2v5.6a1.9 1.9 0 1 1-1.2-1.77" ${W}/><path d="M10 4.2l3-.75v2.2l-3 .75" ${W}/>`),
+  video: TILE("#5c6bc0", `<rect x="4" y="5" width="8.5" height="6" rx="1.2" ${W}/><path d="M7 6.8l3 1.7-3 1.7z" fill="#fff" stroke="none"/>`),
+  pdf: TILE("#d32f2f", `<path d="M5 3.5h3.4L11 6.1v6.4H5z" ${W}/><path d="M6.3 7h2.9M6.3 8.8h2.9M6.3 10.6h2" ${W}/>`),
+  sheet: TILE("#43a047", `<rect x="3.5" y="3.5" width="9" height="9" ${W}/><path d="M3.5 6.5h9M3.5 9.5h9M6.5 3.5v9M9.5 3.5v9" ${W}/>`),
+  slides: TILE("#8e24aa", `<rect x="3.5" y="3.5" width="9" height="6" rx="0.8" ${W}/><path d="M8 9.5v2.5M6 12h4" ${W}/>`),
+  archive: TILE("#6d4c41", `<rect x="4.5" y="2.5" width="7" height="11" rx="1" ${W}/><path d="M8 2.5v4M6.8 4.2h2.4" ${W}/>`),
+  code: TILE("#546e7a", `<path d="M6 5.8L3.8 8 6 10.2M10 5.8L12.2 8 10 10.2" ${W}/>`),
+  doc: TILE("#1e88e5", `<path d="M5 3.5h3.4L11 6.1v6.4H5z" ${W}/><path d="M6.3 7h2.9M6.3 8.8h2.9M6.3 10.6h2" ${W}/>`),
+  exe: TILE("#0288d1", `<rect x="3.5" y="3.5" width="9" height="9" rx="1" ${W}/><path d="M3.5 6h9M6 3.5V6" ${W}/>`),
 };
 
 const EXT_GLYPH = {
@@ -579,10 +576,14 @@ const EXT_GLYPH = {
   xlsx: "sheet", xlsm: "sheet", xls: "sheet", csv: "sheet",
   pptx: "slides", ppt: "slides",
   zip: "archive", rar: "archive", "7z": "archive",
+  docx: "doc",
   js: "code", mjs: "code", ts: "code", rs: "code", py: "code", rb: "code",
   sh: "code", bat: "code", ps1: "code", c: "code", h: "code", cpp: "code",
-  hpp: "code", cs: "code", java: "code",
-  exe: "doc", msi: "doc",
+  hpp: "code", cs: "code", java: "code", html: "code", htm: "code",
+  css: "code", json: "code", xml: "code", yaml: "code", yml: "code",
+  toml: "code", ini: "code", cfg: "code", log: "code", md: "doc",
+  txt: "doc",
+  exe: "exe", msi: "exe",
 };
 
 function fileGlyph(name, kind) {
