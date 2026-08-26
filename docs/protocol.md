@@ -175,6 +175,7 @@ Each grant carries `paths: []`:
 | `GET /v1/admin/events?since=<id>` | Notification feed (new pair requests, grants entering their final 24 h) — consumed by the shell's toast poller |
 | `GET/PUT /v1/admin/settings` | Effective settings; PUT `{ advertise }` toggles LAN visibility **live** (mDNS goodbye/register) and persists to doclink.toml |
 | `GET /v1/admin/browse/{id}/list\|file` | Signed proxy to a contact's share |
+| `GET /v1/admin/browse/{id}/raw?path=` | Same, but inline + extension MIME for in-app preview. Hardened: `CSP: default-src 'none'; sandbox` and `nosniff`, so peer-supplied SVG/HTML cannot script |
 
 Every admin request must carry a local Host header
 (`127.0.0.1:<port>` / `localhost:<port>`) and any Origin/Referer must

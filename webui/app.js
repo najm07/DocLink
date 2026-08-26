@@ -603,6 +603,11 @@ async function loadListing() {
         };
         acts.appendChild(del);
       } else if (e.kind === "file") {
+        const vw = document.createElement("button");
+        vw.type = "button";
+        vw.textContent = "View";
+        vw.title = "Preview before downloading";
+        vw.onclick = () => openViewer(state.selected, e.path, e.size);
         const dl = document.createElement("a");
         dl.textContent = "Download";
         dl.href = "/v1/admin/browse/" + state.selected + "/file?path=" + encodeURIComponent(e.path);
@@ -625,7 +630,7 @@ async function loadListing() {
           pr.disabled = false;
           setTimeout(() => { if (mid.textContent.startsWith("Sent to printer")) mid.textContent = prev; }, 4000);
         };
-        acts.append(dl, pr);
+        acts.append(vw, dl, pr);
       }
       grid.appendChild(row);
     }
@@ -728,7 +733,117 @@ async function saveVisibility() {
   }
 }
 
-// ---- chrome wiring ----
+// ---- file viewer (preview before download) ----
+
+const VIEWABLE_TEXT = ["txt","md","log","csv","json","xml","toml","ini","cfg",
+  "yaml","yml","js","mjs","ts","rs","py","rb","sh","bat","ps1","c","h","cpp",
+  "hpp","cs","java","html","htm","css"];
+const TEXT_PREVIEW_LIMIT = 512 * 1024;
+
+function extOf(name) {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
+}
+
+function viewerKind(name, size) {
+  const e = extOf(name);
+  if (e === "pdf") return "pdf";
+  if (["png","jpg","jpeg","gif","webp","bmp","ico"].includes(e)) return "image";
+  if (e === "svg") return "svg";
+  if (["mp4","m4v","webm","mov","mkv"].includes(e)) return "video";
+  if (["mp3","wav","ogg","oga","m4a","flac"].includes(e)) return "audio";
+  if (VIEWABLE_TEXT.includes(e)) return size <= 8 * 1024 * 1024 ? "text" : "toolarge";
+  if (e === "") return size <= 8 * 1024 * 1024 ? "text" : "toolarge"; // extensionless: try text
+  if (["docx","xlsx","pptx","doc","xls","ppt","odt","ods","odp","rtf"].includes(e)) return "office";
+  return "unknown";
+}
+
+function openViewer(peerId, path, size) {
+  const name = path.split("/").pop();
+  const raw = "/v1/admin/browse/" + peerId + "/raw?path=" + encodeURIComponent(path);
+  const dl  = "/v1/admin/browse/" + peerId + "/file?path=" + encodeURIComponent(path);
+  const kind = viewerKind(name, size);
+
+  closeViewer();
+  const el = document.createElement("div");
+  el.className = "viewer-overlay";
+  el.id = "file-viewer";
+  el.innerHTML =
+    '<div class="viewer">' +
+      '<div class="v-head"><b class="v-name"></b>' +
+        '<span class="dim v-size"></span>' +
+        '<button type="button" class="text" id="v-download">Download</button>' +
+        '<button type="button" class="tool" id="v-close">✕</button></div>' +
+      '<div class="v-body" id="v-body"><p class="hint-row">Loading preview…</p></div>' +
+    '</div>';
+  document.body.appendChild(el);
+  el.querySelector(".v-name").textContent = name;
+  el.querySelector(".v-size").textContent = fmtSize(size);
+  el.querySelector("#v-close").onclick = closeViewer;
+  const dlb = el.querySelector("#v-download");
+  dlb.onclick = () => { location.href = dl; };
+  el.addEventListener("click", (ev) => { if (ev.target === el) closeViewer(); });
+
+  const body = el.querySelector("#v-body");
+  switch (kind) {
+    case "pdf":
+      body.innerHTML = '<iframe class="v-frame" title="PDF preview"></iframe>';
+      body.querySelector("iframe").src = raw;
+      break;
+    case "image":
+    case "svg":
+      body.classList.add("centered");
+      body.innerHTML = '<img class="v-img" alt="preview">';
+      body.querySelector("img").src = raw;
+      break;
+    case "video":
+      body.innerHTML = '<video class="v-media" controls autoplay></video>';
+      body.querySelector("video").src = raw;
+      break;
+    case "audio":
+      body.classList.add("centered");
+      body.innerHTML =
+        '<div class="v-audiocard"><audio controls autoplay style="width:min(560px,90%)"></audio></div>';
+      body.querySelector("audio").src = raw;
+      break;
+    case "text": {
+      fetch(raw)
+        .then((r) => (r.ok ? r.text() : Promise.reject(new Error("HTTP " + r.status))))
+        .then((t) => {
+          if (!document.getElementById("file-viewer")) return; // closed meanwhile
+          if (t.length > TEXT_PREVIEW_LIMIT) t = t.slice(0, TEXT_PREVIEW_LIMIT) + "\n… truncated …";
+          body.innerHTML = '<pre class="v-text"></pre>';
+          body.querySelector("pre").textContent = t;
+        })
+        .catch((err) => {
+          body.innerHTML = '<p class="hint-row">Preview failed: ' + escapeHtml(String(err.message || err)) + "</p>";
+        });
+      break;
+    }
+    case "toolarge":
+      body.innerHTML = '<p class="hint-row">File too large to preview as text — use Download.</p>';
+      break;
+    case "office":
+      body.innerHTML =
+        '<p class="hint-row">In-browser preview isn\u2019t available for Office documents. Download it to open with the associated app.</p>';
+      break;
+    default:
+      body.innerHTML = '<p class="hint-row">No preview available for this file type — use Download.</p>';
+  }
+}
+
+function closeViewer() {
+  const v = document.getElementById("file-viewer");
+  if (v) {
+    // Stop media playback before teardown.
+    v.querySelectorAll("video,audio").forEach((m) => { try { m.pause(); } catch (_) {} });
+    v.remove();
+  }
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeViewer();
+});
 
 function initNetView() {
   const cb = document.getElementById("adv-toggle");

@@ -131,6 +131,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/print/{node_id}", post(print_remote))
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
+        .route("/v1/admin/browse/{node_id}/raw", get(browse_raw))
         .fallback(static_file)
         .layer(middleware::from_fn_with_state(state.clone(), local_only_guard))
         .with_state(state)
@@ -1229,9 +1230,76 @@ async fn browse_file(
     proxy::file(&s, &node_id, &q.path, range.as_deref()).await
 }
 
+/// MIME type for preview purposes, keyed by extension. Anything unknown
+/// becomes application/octet-stream (the UI then offers download only).
+fn preview_mime(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml", // served with script-blocking CSP below
+        "ico" => "image/x-icon",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        "flac" => "audio/flac",
+        "txt" | "md" | "log" | "csv" | "json" | "xml" | "toml" | "ini" | "cfg"
+        | "yaml" | "yml" | "js" | "mjs" | "ts" | "rs" | "py" | "rb" | "sh"
+        | "bat" | "ps1" | "c" | "h" | "cpp" | "hpp" | "cs" | "java" | "html"
+        | "htm" | "css" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Same as browse_file but for in-app preview: inline disposition,
+/// extension-derived MIME, and hardening headers. Peer-supplied content
+/// must never execute — CSP `default-src 'none'` disables scripts (SVG),
+/// plugin/object embedding and outbound fetches inside the document.
+async fn browse_raw(
+    State(s): State<AppState>,
+    Path(node_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<BrowseQuery>,
+) -> Result<Response, ProxyError> {
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let mut resp = proxy::file(&s, &node_id, &q.path, range.as_deref()).await?;
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static(preview_mime(&q.path)),
+    );
+    if let Ok(v) = header::HeaderValue::from_str(&format!(
+        "inline; filename=\"{}\"",
+        q.path.rsplit('/').next().unwrap_or("file").replace('"', "'")
+    )) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    Ok(resp)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::authority_allowed;
+    use super::{authority_allowed, preview_mime};
 
     #[test]
     fn accepts_local_hosts_on_admin_port() {
@@ -1265,6 +1333,23 @@ mod tests {
         // Lookalike suffix tricks.
         assert!(!authority_allowed("127.0.0.1.evil.com:37656", 37656));
         assert!(!authority_allowed("evillhost:37656", 37656));
+    }
+
+    #[test]
+    fn preview_mime_covers_common_types() {
+        assert_eq!(preview_mime("docs/report.pdf"), "application/pdf");
+        assert_eq!(preview_mime("img/pic.PNG"), "image/png"); // case-insensitive
+        assert_eq!(preview_mime("a/b/song.mp3"), "audio/mpeg");
+        assert_eq!(preview_mime("clip.webm"), "video/webm");
+        assert_eq!(preview_mime("notes.md"), "text/plain; charset=utf-8");
+        // HTML is deliberately served as plain text — never executable.
+        assert_eq!(
+            preview_mime("evil.html"),
+            "text/plain; charset=utf-8"
+        );
+        // Office formats have no in-browser preview: octet-stream.
+        assert_eq!(preview_mime("doc.docx"), "application/octet-stream");
+        assert_eq!(preview_mime("noext"), "application/octet-stream");
     }
 
     mod share_scope {
