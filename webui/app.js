@@ -754,8 +754,29 @@ function viewerKind(name, size) {
   if (["mp3","wav","ogg","oga","m4a","flac"].includes(e)) return "audio";
   if (VIEWABLE_TEXT.includes(e)) return size <= 8 * 1024 * 1024 ? "text" : "toolarge";
   if (e === "") return size <= 8 * 1024 * 1024 ? "text" : "toolarge"; // extensionless: try text
-  if (["docx","xlsx","pptx","doc","xls","ppt","odt","ods","odp","rtf"].includes(e)) return "office";
+  if (e === "docx") return "docx";
+  if (["xlsx","xlsm","xls"].includes(e)) return "sheet";
+  if (["pptx","ppt","odt","ods","odp","rtf","doc"].includes(e)) return "office";
   return "unknown";
+}
+
+// Lazy, once-only loader for the vendored preview libraries.
+const libCache = {};
+function loadLib(src) {
+  libCache[src] ??= new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = res;
+    s.onerror = () => { delete libCache[src]; rej(new Error("failed to load " + src)); };
+    document.head.appendChild(s);
+  });
+  return libCache[src];
+}
+
+async function fetchBuffer(raw) {
+  const r = await fetch(raw);
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.arrayBuffer();
 }
 
 function openViewer(peerId, path, size) {
@@ -823,9 +844,59 @@ function openViewer(peerId, path, size) {
     case "toolarge":
       body.innerHTML = '<p class="hint-row">File too large to preview as text — use Download.</p>';
       break;
+    case "docx":
+      body.innerHTML =
+        '<div class="v-docx-wrap"><p class="hint-row">Rendering document…</p></div>';
+      (async () => {
+        try {
+          await loadLib("vendor/jszip.min.js");
+          await loadLib("vendor/docx-preview.min.js");
+          const buf = await fetchBuffer(raw);
+          if (!document.getElementById("file-viewer")) return;
+          const wrap = body.querySelector(".v-docx-wrap");
+          wrap.innerHTML = "";
+          await window.docx.renderAsync(buf, wrap, null, {
+            inWrapper: true,
+            ignoreLastRenderedPageBreak: true,
+          });
+          wrap.classList.add("v-docx-page");
+        } catch (err) {
+          const wrap = body.querySelector(".v-docx-wrap");
+          if (wrap) wrap.innerHTML = '<p class="hint-row">Preview failed: ' + escapeHtml(String(err.message || err)) + "</p>";
+        }
+      })();
+      break;
+    case "sheet": {
+      body.innerHTML =
+        '<div class="v-sheet-wrap"><p class="hint-row">Rendering spreadsheet…</p></div>';
+      (async () => {
+        try {
+          await loadLib("vendor/xlsx.full.min.js");
+          const buf = await fetchBuffer(raw);
+          if (!document.getElementById("file-viewer")) return;
+          const wb = window.XLSX.read(buf, { type: "array", sheetRows: 5000 });
+          const wrap = body.querySelector(".v-sheet-wrap");
+          wrap.innerHTML = "";
+          for (const sheetName of wb.SheetNames) {
+            const h = document.createElement("h4");
+            h.className = "v-sheet-name";
+            h.textContent = sheetName;
+            wrap.appendChild(h);
+            const holder = document.createElement("div");
+            holder.className = "v-sheet";
+            holder.innerHTML = window.XLSX.utils.sheet_to_html(wb.Sheets[sheetName]);
+            wrap.appendChild(holder);
+          }
+        } catch (err) {
+          const wrap = body.querySelector(".v-sheet-wrap");
+          if (wrap) wrap.innerHTML = '<p class="hint-row">Preview failed: ' + escapeHtml(String(err.message || err)) + "</p>";
+        }
+      })();
+      break;
+    }
     case "office":
       body.innerHTML =
-        '<p class="hint-row">In-browser preview isn\u2019t available for Office documents. Download it to open with the associated app.</p>';
+        '<p class="hint-row">No in-browser renderer for this format (.ppt/.pptx/.odp/.doc legacy) — use Download to open it locally.</p>';
       break;
     default:
       body.innerHTML = '<p class="hint-row">No preview available for this file type — use Download.</p>';

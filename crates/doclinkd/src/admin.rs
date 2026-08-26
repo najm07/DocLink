@@ -213,11 +213,18 @@ async fn static_file(uri: axum::http::Uri) -> Response {
             )
                 .into_response();
             // Defense-in-depth for the localhost UI (complements the
-            // Host/Origin guard): no third-party origins, no inline scripts.
+            // Host/Origin guard): scripts stay same-origin, styles may be
+            // inline because the Office preview libs inject them, and
+            // blob:/data: cover the media docx-preview renders.
             response.headers_mut().insert(
                 header::CONTENT_SECURITY_POLICY,
                 header::HeaderValue::from_static(
-                    "default-src 'self'; img-src 'self' data:; style-src 'self'",
+                    "default-src 'self'; \
+                     script-src 'self'; \
+                     style-src 'self' 'unsafe-inline'; \
+                     img-src 'self' data: blob:; \
+                     font-src 'self' data:; \
+                     object-src 'none'",
                 ),
             );
             response.headers_mut().insert(
