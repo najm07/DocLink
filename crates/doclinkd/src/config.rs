@@ -28,6 +28,10 @@ pub struct Config {
     /// flag it); discovery and manual host:port still work.
     #[serde(default = "default_true")]
     pub subnet_scan: bool,
+    /// Auto-update checks against GitHub releases. Off means the daemon
+    /// never contacts the internet; the UI can still check manually.
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
 }
 
 fn default_node_name() -> String {
@@ -56,6 +60,7 @@ impl Default for Config {
             share_root: default_share_root(),
             advertise: default_true(),
             subnet_scan: default_true(),
+            check_updates: default_true(),
         }
     }
 }

@@ -776,6 +776,109 @@ async function saveVisibility() {
   }
 }
 
+// ---- update checks & settings popover ----
+
+let updateInfo = null;
+
+async function refreshUpdate() {
+  try {
+    updateInfo = await api("/v1/admin/update/status");
+  } catch (_) { return; }
+  renderUpdate();
+}
+
+function renderUpdate() {
+  if (!updateInfo) return;
+  const badge = document.getElementById("btn-update");
+  badge.hidden = !updateInfo.updateAvailable;
+
+  const ver = document.getElementById("pop-version");
+  ver.textContent = "DocLink v" + (updateInfo.appVersion || "");
+  const status = document.getElementById("pop-status");
+  const box = document.getElementById("pop-update");
+  const text = document.getElementById("pop-update-text");
+  const prog = document.getElementById("pop-progress");
+  const apply = document.getElementById("pop-apply");
+
+  if (updateInfo.checking) {
+    box.hidden = false; prog.hidden = true;
+    text.textContent = "Checking for updates…";
+  } else if (typeof updateInfo.downloadProgress === "number") {
+    box.hidden = false; prog.hidden = false;
+    text.textContent = "Downloading update…";
+    prog.firstElementChild.style.width = Math.round(updateInfo.downloadProgress * 100) + "%";
+  } else if (updateInfo.applied) {
+    box.hidden = false; prog.hidden = true;
+    text.textContent = "Update applied — DocLink is restarting…";
+  } else if (updateInfo.error) {
+    box.hidden = false; prog.hidden = true;
+    text.textContent = updateInfo.error;
+  } else if (updateInfo.updateAvailable) {
+    box.hidden = false; prog.hidden = true;
+    text.textContent = "Update to v" + updateInfo.latest + " available.";
+    apply.hidden = false;
+  } else {
+    box.hidden = true;
+    status.textContent = updateInfo.lastCheck
+      ? "up to date · checked " + fmtTime(updateInfo.lastCheck)
+      : "not checked yet";
+  }
+
+  const chk = document.getElementById("pop-check-updates");
+  if (chk && chk !== document.activeElement) { chk.checked = !!updateInfo.enabled; }
+}
+
+function toggleSettings(open) {
+  const pop = document.getElementById("settings-pop");
+  const mask = document.getElementById("pop-mask");
+  renderUpdate();
+  if (open) {
+    pop.hidden = false;
+    mask.hidden = false;
+  } else {
+    pop.hidden = true;
+    mask.hidden = true;
+  }
+}
+
+async function saveCheckUpdates(v) {
+  try {
+    const cur = await api("/v1/admin/settings");
+    const r = await api("/v1/admin/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ advertise: !!cur.advertise, checkUpdates: v }),
+    });
+    updateInfo = Object.assign({}, updateInfo, { enabled: !!r.checkUpdates });
+    renderUpdate();
+    if (v) doCheckNow();
+  } catch (e) {
+    alert(e.message || String(e));
+    renderUpdate();
+  }
+}
+
+async function doCheckNow() {
+  try {
+    const r = await api("/v1/admin/update/check", { method: "POST" });
+    if (!r.ok) throw new Error(r.error || "update check failed");
+    await refreshUpdate();
+  } catch (e) {
+    updateInfo = Object.assign({}, updateInfo || {}, { error: e.message || String(e) });
+    renderUpdate();
+  }
+}
+
+async function doApplyUpdate() {
+  try {
+    await api("/v1/admin/update/apply", { method: "POST" });
+    await refreshUpdate();
+  } catch (e) {
+    updateInfo = Object.assign({}, updateInfo || {}, { error: e.message || String(e) });
+    renderUpdate();
+  }
+}
+
 // ---- file viewer (preview before download) ----
 
 const VIEWABLE_TEXT = ["txt","md","log","csv","json","xml","toml","ini","cfg",
@@ -1159,6 +1262,25 @@ loadRequests();
 loadGrants();
 initNetView();
 initFileView();
+refreshUpdate();
+
+document.getElementById("btn-settings").addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleSettings(document.getElementById("settings-pop").hidden);
+});
+document.getElementById("btn-update").addEventListener("click", () => doApplyUpdate());
+document.getElementById("pop-mask").addEventListener("click", () => toggleSettings(false));
+document.getElementById("pop-check-now").addEventListener("click", doCheckNow);
+document.getElementById("pop-apply").addEventListener("click", doApplyUpdate);
+document.getElementById("pop-check-updates").addEventListener("change", (e) => {
+  saveCheckUpdates(e.target.checked);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !document.getElementById("settings-pop").hidden) {
+    toggleSettings(false);
+  }
+});
+
 setInterval(() => {
   loadContacts();
   loadRequests();
@@ -1166,4 +1288,5 @@ setInterval(() => {
   if (!document.getElementById("add-form").hidden) loadPeers();
   if (state.view === "net") renderNet();
 }, 5000);
+setInterval(refreshUpdate, 20000);
 loadListing();

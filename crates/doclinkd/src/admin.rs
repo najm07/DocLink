@@ -7,6 +7,7 @@ use crate::proxy::{self, ProxyError};
 use crate::server::{self, PairingState};
 use crate::share::{ShareError, ShareRoot};
 use crate::store::{Contact, ContactsFile, Grant, GrantsFile, SharedStore};
+use crate::updater::{self, UpdateOverride};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
@@ -59,6 +60,11 @@ pub(crate) struct AdminInner {
     pub data_port: u16,
     /// Where doclink.toml lives, so the settings toggle can persist.
     pub config_path: std::path::PathBuf,
+    /// Whether the daemon may contact GitHub for update checks
+    /// (config check_updates). Manual "Check now" stays available.
+    pub check_updates: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Live update-check/download state for the UI.
+    pub update: std::sync::Arc<UpdateOverride>,
 }
 
 impl AppState {
@@ -82,6 +88,8 @@ impl AppState {
         advertise_on: std::sync::Arc<std::sync::atomic::AtomicBool>,
         data_port: u16,
         config_path: std::path::PathBuf,
+        check_updates: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        update: std::sync::Arc<UpdateOverride>,
     ) -> Self {
         Self {
             inner: Arc::new(AdminInner {
@@ -101,6 +109,8 @@ impl AppState {
                 advertise_on,
                 data_port,
                 config_path,
+                check_updates,
+                update,
             }),
         }
     }
@@ -130,6 +140,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/settings", get(get_settings).put(put_settings))
         .route("/v1/admin/print/{node_id}", post(print_remote))
         .route("/v1/admin/search-all", get(search_all))
+        .route("/v1/admin/update/status", get(update_status))
+        .route("/v1/admin/update/check", post(update_check))
+        .route("/v1/admin/update/apply", post(update_apply))
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
         .route("/v1/admin/browse/{node_id}/raw", get(browse_raw))
@@ -999,25 +1012,27 @@ struct EventsQuery {
     since: u64,
 }
 
-// ---- Settings (M5 discovery toggle) ----
+// ---- Settings (discovery + update toggles) ----
 
-/// Rewrite doclink.toml with the current effective config, flipping
-/// `advertise`. Other keys are preserved as values (comments are not).
-fn persist_advertise(path: &std::path::Path, cfg: &crate::config::Config, advertise: bool) -> Result<(), String> {
-    let mut next = cfg.clone();
-    next.advertise = advertise;
-    let text = toml::to_string_pretty(&next)
+/// Rewrite doclink.toml with the current effective config. Mutable
+/// toggles live in Inner fields and are copied in here.
+fn persist_settings(path: &std::path::Path, cfg: &crate::config::Config) -> Result<(), String> {
+    let text = toml::to_string_pretty(cfg)
         .map_err(|e| format!("serialize config: {e}"))?;
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Effective settings for the UI.
 async fn get_settings(State(s): State<AppState>) -> Json<serde_json::Value> {
-    let advertise = s.inner.advertise_on.load(std::sync::atomic::Ordering::Relaxed);
+    use std::sync::atomic::Ordering;
+    let advertise = s.inner.advertise_on.load(Ordering::Relaxed);
+    let check_updates = s.inner.check_updates.load(Ordering::Relaxed);
     Json(serde_json::json!({
         "advertise": advertise,
         "subnetScan": s.inner.scan_enabled,
+        "checkUpdates": check_updates,
         "nodeName": s.inner.node.name,
+        "appVersion": updater::APP_VERSION,
     }))
 }
 
@@ -1027,6 +1042,10 @@ struct SettingsBody {
     /// daemon handle itself stays alive — re-registering through it is
     /// what lets peers' caches see the return as a *changed* record.
     advertise: bool,
+    /// Optional: flip auto-update checking. Absent means "leave as is",
+    /// which keeps the existing visibility PUT endpoint working.
+    #[serde(default)]
+    check_updates: Option<bool>,
 }
 
 /// Toggle beacon suppression live and persist it, so a PC can stay
@@ -1071,12 +1090,21 @@ async fn put_settings(
             .store(body.advertise, Ordering::Relaxed);
     }
 
+    if let Some(v) = body.check_updates {
+        s.inner.check_updates.store(v, Ordering::Relaxed);
+        info!(check_updates = v, "update checks toggled");
+    }
+
     // Persist even when idempotent so the file always matches reality.
-    if let Err(e) = persist_advertise(&s.inner.config_path, &snapshot_config(&s), body.advertise) {
-        tracing::warn!(%e, "could not persist advertise setting to doclink.toml");
+    if let Err(e) = persist_settings(&s.inner.config_path, &snapshot_config(&s)) {
+        tracing::warn!(%e, "could not persist settings to doclink.toml");
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e));
     }
-    Ok(Json(serde_json::json!({ "advertise": body.advertise })))
+    let check_updates = s.inner.check_updates.load(Ordering::Relaxed);
+    Ok(Json(serde_json::json!({
+        "advertise": body.advertise,
+        "checkUpdates": check_updates,
+    })))
 }
 
 /// Rebuild the effective config for persistence. The admin plane keeps
@@ -1091,6 +1119,10 @@ fn snapshot_config(s: &AppState) -> crate::config::Config {
             .advertise_on
             .load(std::sync::atomic::Ordering::Relaxed),
         subnet_scan: s.inner.scan_enabled,
+        check_updates: s
+            .inner
+            .check_updates
+            .load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
@@ -1099,6 +1131,68 @@ fn snapshot_config(s: &AppState) -> crate::config::Config {
 /// so toasts survive neither restarts nor duplicates.
 async fn events_since(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Json<Vec<crate::events::Event>> {
     Json(s.inner.events.lock().unwrap().since(q.since))
+}
+
+// ---- Update (auto-check + one-click apply) ----
+
+/// Full updater view for the UI: settings mirror + lifecycle state.
+/// `status` only carries a newer build when one exists.
+async fn update_status(State(s): State<AppState>) -> Json<serde_json::Value> {
+    use std::sync::atomic::Ordering;
+    let st = s.inner.update.inner.lock().unwrap().clone();
+    let up = st.status.as_ref();
+    let update_available = up.is_some_and(|s| {
+        updater::version_gt(&s.latest, updater::APP_VERSION)
+    });
+    Json(serde_json::json!({
+        "enabled": s.inner.check_updates.load(Ordering::Relaxed),
+        "appVersion": updater::APP_VERSION,
+        "checking": st.checking,
+        "lastCheck": st.last_check_unix,
+        "updateAvailable": update_available,
+        "downloadProgress": st.downloading,
+        "applied": st.applied,
+        "error": st.error,
+        "latest": up.map(|s| s.latest.clone()),
+        "downloadUrl": up.and_then(|s| s.download_url.clone()),
+        "releaseNotes": up.and_then(|s| s.release_notes.clone()),
+        "publishedAt": up.and_then(|s| s.published_at.clone()),
+    }))
+}
+
+/// Manual check — allowed even with auto-check off, so the toggle stays
+/// a hard no-network boundary that can still be probed on user demand.
+async fn update_check(State(s): State<AppState>) -> Json<serde_json::Value> {
+    let shared = s.inner.update.clone();
+    let outcome = updater::run_check(&s.inner.http, &shared).await;
+
+    let st = shared.inner.lock().unwrap().clone();
+    if outcome.is_ok() {
+        Json(serde_json::json!({
+            "ok": true,
+            "updateAvailable": st.status.as_ref().is_some_and(|up| {
+                updater::version_gt(&up.latest, updater::APP_VERSION)
+            }),
+            "latest": st.status.map(|up| up.latest),
+            "error": st.error,
+        }))
+    } else {
+        Json(serde_json::json!({
+            "ok": false,
+            "error": st.error,
+        }))
+    }
+}
+
+/// Download the published update, stage it, and restart the app.
+async fn update_apply(
+    State(s): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let shared = s.inner.update.clone();
+    match updater::apply_update(&shared, &s.inner.http).await {
+        Ok(msg) => Ok(Json(serde_json::json!({ "ok": true, "message": msg }))),
+        Err(e) => Err(err(StatusCode::BAD_GATEWAY, e)),
+    }
 }
 
 // ---- Print (M3) ----

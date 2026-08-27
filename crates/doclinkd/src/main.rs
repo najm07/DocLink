@@ -9,6 +9,7 @@ mod server;
 mod share;
 mod store;
 mod tls;
+mod updater;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -128,6 +129,7 @@ async fn main() -> Result<()> {
         name: cfg.node_name(),
         version: PROTOCOL_VERSION.to_string(),
         fingerprint: identity.fingerprint(),
+        app_version: updater::APP_VERSION.to_string(),
     };
     info!(name = %node.name, "doclinkd starting");
     info!(id = %node.node_id, "your DocLink ID — share it with PCs that want to add you");
@@ -238,6 +240,23 @@ async fn main() -> Result<()> {
     let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), contacts.clone(), pairing.clone(), events.clone());
     let data_app = server::router(data_state);
     let config_path = cli.config.clone().unwrap_or_else(|| PathBuf::from("doclink.toml"));
+
+    // Auto-update: shared lifecycle state + a dedicated HTTPS client
+    // (the pinned-peer client above must never touch the internet).
+    let update_state = std::sync::Arc::new(updater::UpdateOverride::default());
+    let check_updates = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(cfg.check_updates));
+    tokio::spawn(updater::run_check_loop(
+        updater::http(),
+        check_updates.clone(),
+        update_state.clone(),
+        shutdown_rx.clone(),
+    ));
+    if cfg.check_updates {
+        info!(version = updater::APP_VERSION, "auto-update checks enabled");
+    } else {
+        info!("auto-update checks disabled (config check_updates)");
+    }
+
     let admin_state = admin::AppState::new(
         node,
         identity,
@@ -255,6 +274,8 @@ async fn main() -> Result<()> {
         advertise_on,
         http_port,
         config_path,
+        check_updates,
+        update_state,
     );
     let admin_app = admin::router(admin_state);
 

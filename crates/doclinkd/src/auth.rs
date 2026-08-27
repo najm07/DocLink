@@ -199,6 +199,7 @@ mod tests {
             share_root: dir.path.join("shared").to_string_lossy().into_owned(),
             advertise: false,
             subnet_scan: false,
+            check_updates: false,
         };
         let grants: store::SharedStore<GrantsFile> = store::open(&dir.path.join("g.json")).unwrap();
         let contacts: store::SharedStore<crate::store::ContactsFile> =
@@ -209,6 +210,7 @@ mod tests {
             name: "test-node".into(),
             version: "0.2".into(),
             fingerprint: identity.fingerprint(),
+            app_version: "0.0.0-test".into(),
         };
         let state = AppState::new(
             &cfg,

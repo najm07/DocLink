@@ -55,8 +55,13 @@ impl Beacon {
 pub struct NodeInfo {
     pub node_id: String,
     pub name: String,
+    /// Wire protocol version (PROTOCOL_VERSION).
     pub version: String,
     pub fingerprint: String,
+    /// App build version (Cargo workspace version). Empty on peers that
+    /// predate this field — the old-protocol fallback path covers them.
+    #[serde(default)]
+    pub app_version: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

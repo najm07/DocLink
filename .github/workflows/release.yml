@@ -1,0 +1,42 @@
+name: Release
+
+# Build the portable zip + MSI installer and attach them to a GitHub
+# Release. Tag a commit with a version (e.g. `git tag v0.3.0 && git push
+# --tags`) and the daemon's updater will offer the build to every PC
+# running an older version. Tags must match the workspace version to
+# avoid confusion, but the workflow itself only needs the `v*` shape.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build portable package
+        shell: pwsh
+        run: .\dist.ps1
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: .\msi.ps1
+
+      - name: Draft GitHub release
+        shell: pwsh
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" `
+            "dist/doclink-portable.zip" `
+            "dist/DocLink-setup.msi" `
+            --title "DocLink $env:GITHUB_REF_NAME" `
+            --generate-notes

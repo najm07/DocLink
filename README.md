@@ -93,4 +93,5 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.3, TLS
 - [ ] Print-on-host through PrintLink interop
 - [ ] WebDAV facade (mount a peer's share as a drive letter)
 - [x] Search across all granted peers — toolbar box fans out to every approved, reachable PC; results grouped per PC with View/Download/Print, scope-enforced
+- [x] Auto-update — settings toggle checks GitHub releases every 6 h; a badge next to the ID chip appears when a newer build exists and downloads + swaps the binaries with one click
 - [ ] `Inbox/` write support (upload into a peer's drop folder)

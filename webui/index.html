@@ -17,6 +17,12 @@
       <span class="id-kicker">ID</span>
       <span id="this-node-id">…</span>
     </button>
+    <button type="button" class="title-icon update-flag" id="btn-update" title="DocLink update available" hidden>
+      <svg viewBox="0 0 16 16"><path d="M8 2v8M4.5 7.5L8 11l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M2 13h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+    <button type="button" class="title-icon" id="btn-settings" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 16 16"><path d="M7.5 2l.75 1.4 1.55.25 1.1-1.1 1.5 1.5-1.1 1.1.25 1.55L14.5 7.5v2l-1.95.8-.25 1.55 1.1 1.1-1.5 1.5-1.1-1.1-1.55.25L7.5 15h-2l-.75-1.4-1.55-.25-1.1 1.1-1.5-1.5 1.1-1.1-.25-1.55L.5 9.5v-2l1.95-.8.25-1.55-1.1-1.1 1.5-1.5 1.1 1.1 1.55-.25L5.5 2z" fill="none" stroke="currentColor" stroke-width="1.1"/><circle cx="7.5" cy="9.5" r="2.1" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+    </button>
     <div class="win-controls" id="win-controls" hidden>
       <button type="button" data-win="minimize" title="Minimize" aria-label="Minimize">
         <svg viewBox="0 0 10 10"><path d="M1 5h8" /></svg>
@@ -27,6 +33,30 @@
       <button type="button" class="close" data-win="close" title="Close" aria-label="Close">
         <svg viewBox="0 0 10 10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" /></svg>
       </button>
+    </div>
+  </div>
+
+  <div id="pop-mask" class="pop-mask" hidden></div>
+  <div id="settings-pop" class="title-pop" hidden>
+    <div class="pop-head">Settings</div>
+    <label class="pop-row">
+      <span>
+        <span class="pop-label">Check for updates</span>
+        <span class="pop-sub">While online, DocLink checks GitHub for a newer build every 6 hours</span>
+      </span>
+      <input type="checkbox" id="pop-check-updates" />
+    </label>
+    <div class="pop-row pop-divider">
+      <span class="pop-label" id="pop-version">DocLink</span>
+      <span id="pop-status" class="pop-sub right"></span>
+    </div>
+    <div id="pop-update" class="pop-update" hidden>
+      <span id="pop-update-text"></span>
+      <div class="up-progress" id="pop-progress" hidden><i></i></div>
+    </div>
+    <div class="pop-actions">
+      <button type="button" id="pop-check-now">Check now</button>
+      <button type="button" id="pop-apply" class="primary" hidden>Download &amp; restart</button>
     </div>
   </div>
 
