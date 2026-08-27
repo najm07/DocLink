@@ -1286,19 +1286,16 @@ async fn print_remote(
     State(s): State<AppState>,
     Path(node_id): Path<String>,
     Query(q): Query<BrowseQuery>,
-) -> Result<StatusCode, axum::response::Response> {
-    use axum::response::IntoResponse;
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     if q.path.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "path must name a file").into_response());
+        return Err(err(StatusCode::BAD_REQUEST, "path must name a file"));
     }
     let resp = proxy::file(&s, &node_id, &q.path, None)
         .await
-        .map_err(|e| e.into_response())?;
+        .map_err(proxy_error)?;
     let bytes = axum::body::to_bytes(resp.into_body(), 2 * 1024 * 1024 * 1024)
         .await
-        .map_err(|e| {
-            err(StatusCode::BAD_GATEWAY, format!("download failed: {e}")).into_response()
-        })?;
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("download failed: {e}")))?;
 
     // Keep the remote filename (and thus its extension/association).
     let name = q.path.rsplit('/').next().unwrap_or("document");
@@ -1314,16 +1311,12 @@ async fn print_remote(
     let target = dir.join(format!("{stamp}-{safe_name}"));
     std::fs::write(&target, &bytes).map_err(|e| {
         err(StatusCode::INTERNAL_SERVER_ERROR, format!("staging failed: {e}"))
-            .into_response()
     })?;
 
     tokio::task::spawn_blocking(move || shell_print(&target))
         .await
-        .map_err(|e| {
-            err(StatusCode::INTERNAL_SERVER_ERROR, format!("print task failed: {e}"))
-                .into_response()
-        })?
-        .map_err(|m| err(StatusCode::UNPROCESSABLE_ENTITY, m).into_response())?;
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("print task failed: {e}")))?
+        .map_err(|m| err(StatusCode::UNPROCESSABLE_ENTITY, m))?;
 
     tracing::info!(file = %safe_name, peer = %node_id, "sent to printer");
     Ok(StatusCode::NO_CONTENT)
