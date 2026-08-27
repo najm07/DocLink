@@ -34,6 +34,8 @@ jobs:
 
       - name: Draft GitHub release
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$env:GITHUB_REF_NAME" `
             "dist/doclink-portable.zip" `
