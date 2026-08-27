@@ -6,6 +6,8 @@
 //! node_name = "PC-Direction"
 //! http_port = 37655
 //! share_root = "shared"
+//! inbox_root = "inbox"
+//! inbox_max_size = 268435456   # 256 MiB per uploaded file
 //! advertise = true  # mDNS advertising; set false to hide this PC from discovery
 //! ```
 
@@ -21,6 +23,13 @@ pub struct Config {
     pub http_port: u16,
     #[serde(default = "default_share_root")]
     pub share_root: String,
+    /// Drop folder peers upload into. Stays out of `shared/` until the
+    /// owner accepts a file (moves it across) or discards it.
+    #[serde(default = "default_inbox_root")]
+    pub inbox_root: String,
+    /// Largest single file a peer may upload into the inbox (bytes).
+    #[serde(default = "default_inbox_max_size")]
+    pub inbox_max_size: u64,
     #[serde(default = "default_true")]
     pub advertise: bool,
     /// Active /24 probing fallback when mDNS misses. Off avoids the
@@ -48,6 +57,16 @@ fn default_share_root() -> String {
     "shared".into()
 }
 
+fn default_inbox_root() -> String {
+    "inbox".into()
+}
+
+const MIB: u64 = 1024 * 1024;
+
+fn default_inbox_max_size() -> u64 {
+    256 * MIB
+}
+
 fn default_true() -> bool {
     true
 }
@@ -58,6 +77,8 @@ impl Default for Config {
             node_name: default_node_name(),
             http_port: default_http_port(),
             share_root: default_share_root(),
+            inbox_root: default_inbox_root(),
+            inbox_max_size: default_inbox_max_size(),
             advertise: default_true(),
             subnet_scan: default_true(),
             check_updates: default_true(),

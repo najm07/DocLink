@@ -4,8 +4,10 @@
 
 use crate::auth;
 use crate::config::Config;
+use crate::inbox::{InboxMeta, InboxRoot};
 use crate::share::{ShareError, ShareRoot};
 use crate::store::{ContactsFile, Grant, GrantsFile, SharedStore};
+use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
@@ -15,7 +17,7 @@ use axum::{Json, Router};
 use doclink_core::identity::NodeIdentity;
 use doclink_core::protocol::{
     canonical_decision_string, canonical_request_string, EntryKind, ErrorResponse, ListResponse,
-    NodeInfo, PairDecision, PairRequest, PairStatus, PairStatusResponse,
+    NodeInfo, PairDecision, PairRequest, PairStatus, PairStatusResponse, UploadResult,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -98,6 +100,9 @@ pub struct AppState {
 pub(crate) struct Inner {
     pub node: NodeInfo,
     pub share: ShareRoot,
+    pub inbox: InboxRoot,
+    /// Per-file ceiling for inbox uploads (config `inbox_max_size`).
+    pub inbox_max_size: u64,
     pub grants: SharedStore<GrantsFile>,
     pub contacts: SharedStore<ContactsFile>,
     pub pairing: PairingState,
@@ -122,10 +127,13 @@ impl AppState {
         events: crate::events::SharedEvents,
     ) -> Self {
         let share = ShareRoot::new(cfg.share_root.clone()).expect("share root must be creatable");
+        let inbox = InboxRoot::new(cfg.inbox_root.clone()).expect("inbox root must be creatable");
         Self {
             inner: Arc::new(Inner {
                 node,
                 share,
+                inbox,
+                inbox_max_size: cfg.inbox_max_size,
                 grants,
                 contacts,
                 pairing,
@@ -153,6 +161,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/list", get(list))
         .route("/v1/file", get(file))
         .route("/v1/search", get(search))
+        .route("/v1/upload", post(upload))
         .merge(pair_routes)
         .with_state(state)
 }
@@ -455,6 +464,57 @@ async fn file(
             .into_response());
     }
     Ok((out, axum::body::Body::from_stream(stream)).into_response())
+}
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    /// Single-component file name (deduped on collision by the inbox).
+    name: String,
+}
+
+/// POST /v1/upload — drop a file into the recipient's inbox.
+/// The whole body is buffered first so the signature (which covers the
+/// body bytes) can be verified before anything touches disk; the inbox
+/// size cap bounds the damage a stiffed peer could do.
+async fn upload(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<UploadQuery>,
+    body: Bytes,
+) -> Result<Json<UploadResult>, (StatusCode, Json<ErrorResponse>)> {
+    let name = q.name.trim();
+    if !crate::inbox::valid_name(name) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid file name"));
+    }
+    let path_q = format!("/v1/upload?name={}", urlencoding::encode(name));
+    let grant = auth::require_auth(&headers, "POST", &path_q, &body, &s)
+        .map_err(auth::AuthError::into_response)?;
+    if body.len() as u64 > s.inner.inbox_max_size {
+        let cap = s.inner.inbox_max_size / (1024 * 1024);
+        return Err(err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("file exceeds the receiving PC's inbox size limit ({cap} MiB)"),
+        ));
+    }
+    let stored = s
+        .inner
+        .inbox
+        .write_file(name, &body, &InboxMeta {
+            from: Some(grant.name.clone()),
+            from_node_id: Some(grant.node_id.clone()),
+            received_unix: Some(unix_now()),
+        })
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "inbox write failed"))?;
+    s.inner.events.lock().unwrap().push(
+        "inbox-file",
+        format!("{} sent you {}", grant.name, stored),
+        "Accept it into your shared folder, download it, or discard it.".into(),
+    );
+    Ok(Json(UploadResult {
+        name: stored,
+        size: body.len() as u64,
+    }))
 }
 
 /// Scoped recursive filename search over the caller's granted view.

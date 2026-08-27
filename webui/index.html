@@ -69,6 +69,10 @@
         <svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M4 8l8 6 8-6"/></svg>
         <span id="act-inbox-badge" class="act-badge" hidden>0</span>
       </button>
+      <button type="button" class="act" data-view="inbox-files" title="Inbox — files sent to you">
+        <svg viewBox="0 0 24 24"><path d="M4 4h16v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M12 7v6M9.5 10.5L12 13l2.5-2.5"/></svg>
+        <span id="act-inbox-files-badge" class="act-badge" hidden>0</span>
+      </button>
       <button type="button" class="act" data-view="grants" title="Granted access">
         <svg viewBox="0 0 24 24"><path d="M12 3l8 4v6c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V7z"/></svg>
       </button>
@@ -125,6 +129,12 @@
       <section class="side-view" data-view="inbox" hidden>
         <div class="side-head"><h2>INCOMING</h2></div>
         <ul id="requests" class="tree"></ul>
+      </section>
+
+      <section class="side-view" data-view="inbox-files" hidden>
+        <div class="side-head"><h2>INBOX</h2></div>
+        <p class="dim net-hint">Files PCs sent you. Accept moves one into shared/, download keeps it here, discard deletes it.</p>
+        <ul id="inbox-files" class="tree"></ul>
       </section>
 
       <section class="side-view" data-view="grants" hidden>

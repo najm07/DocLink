@@ -1,4 +1,4 @@
-# DocLink wire protocol — v0.3
+# DocLink wire protocol — v0.4
 
 This document is the language-neutral specification. `doclink-core` is the
 reference implementation; any future client (C#, PrintLink interop) conforms
@@ -22,6 +22,12 @@ v0.2 introduces the **pairing trust model** (AnyDesk/TeamViewer style):
 - All peer traffic after pairing is **signature-authenticated**.
 - Grants may be **scoped**: full access, or an explicit list of files and
   folders the grantee can see.
+
+v0.4 adds one write path: **inbox drops**. An approved peer may upload a
+single file into the owner's **inbox** drop folder (`POST /v1/upload`).
+The owner reviews it and either **accepts** (moves it into `shared/`) or
+**discards** it. The share itself stays read-only — a peer can never plant
+content into your shared folder unvetted.
 
 Two HTTP planes per node:
 
@@ -84,6 +90,10 @@ the same second — required for the anti-replay cache to coexist with
 fast successive calls to the same path. Senders MUST generate a fresh
 random nonce per request.
 
+For requests with a body (`POST /v1/upload`), `<BODY>` is the request
+bytes rendered as lossy UTF-8 — the same bytes the receiver must read
+before writing anything, so an upload is only trusted after it verifies.
+
 Verification rules (publisher MUST enforce):
 
 1. Timestamp within ±900 s of now → else `401`. (Generous on purpose:
@@ -130,6 +140,7 @@ Verification rules (publisher MUST enforce):
 | `GET /v1/list?path=<rel>` | required | `ListResponse`, scope-filtered |
 | `GET /v1/search?q=<term>` | required | `SearchResponse`: case-insensitive filename matches across the caller's granted scope (recursive, visit-budget 20k, max 200 hits, `truncated` flag) |
 | `GET /v1/file?path=<rel>` | required | file bytes, streamed; single `Range` supported (`206` + `Content-Range`, `416` when unsatisfiable), `Content-Disposition: attachment` |
+| `POST /v1/upload?name=<file>` | required, **body signed** | drop one file into the owner's inbox → `UploadResult { name, size }`. `<file>` is a single component (no `/`, `\`, `:`, etc. — see inbox rules below). Collisions are renamed `name (1).ext`. Oversized (`> inbox_max_size`) → `413` |
 | `POST /v1/pair/request` | self-signed body | `PairStatusResponse` |
 | `POST /v1/pair/decision` | self-signed body **from a known grantor** | `204`; decisions from unpaired keys are rejected (`403`) |
 | `GET /v1/pair/status?node_id=<id>` | signed poll — caller must authenticate as the queried node (pubkey must hash to it) | `PairStatusResponse` |
@@ -155,6 +166,26 @@ Each grant carries `paths: []`:
   a file is allowed only when the file equals or lies inside a granted
   path. Anything else → `403`.
 
+### Inbox (`/v1/upload`, v0.4)
+
+Approved peers can upload; the owner's pubkey/identity is already
+authenticated by the normal header scheme. The receiving node MUST buffer
+the whole request body before writing so it can verify the signature
+(which covers the body bytes lossily) — the `inbox_max_size` cap bounds
+the buffered memory and storage a stiffed peer can force. Enforcement:
+
+- `<file>` must be a **single path component**: no `/`, `\`, `:`, `*`,
+  `?`, `"`, `<`, `>`, `|`, control chars, dot-prefixed names, trailing
+  dots/spaces, and the `.doclink.json` suffix is reserved for metadata.
+  Anything else → `400`.
+- Files land in `<inbox_root>` (default `inbox/`), never in `shared/`.
+  Colliding names get `stem (1).ext`, `stem (2).ext`, ….
+- The receiver writes `<name>.doclink.json` beside each upload recording
+  the sender (`{ from, from_node_id, received_unix }`); these sidecars are
+  hidden from listings. Files dropped directly on disk simply lack them.
+- Receiver actions: **accept** moves the file into the share root (deduped
+  there too), **discard** deletes it — both are owner-only admin operations.
+
 ## 7. Admin endpoints (admin plane, localhost only)
 
 | Endpoint | Purpose |
@@ -177,6 +208,11 @@ Each grant carries `paths: []`:
 | `GET/PUT /v1/admin/settings` | Effective settings; PUT `{ advertise }` toggles LAN visibility **live** (mDNS goodbye/register) and persists to doclink.toml |
 | `GET /v1/admin/browse/{id}/list\|file` | Signed proxy to a contact's share |
 | `GET /v1/admin/browse/{id}/raw?path=` | Same, but inline + extension MIME for in-app preview. Hardened: `CSP: default-src 'none'; sandbox` and `nosniff`, so peer-supplied SVG/HTML cannot script |
+| `GET /v1/admin/inbox` | List inbox entries (`InboxEntry[]`, newest first, with sender metadata) |
+| `GET /v1/admin/inbox/{name}/file` | Download an inbox file |
+| `POST /v1/admin/inbox/{name}/accept` | Move the file into `shared/` (deduped) → `{ name }` |
+| `DELETE /v1/admin/inbox/{name}` | Discard (delete) the file |
+| `POST /v1/admin/send` | Send one of my own shared files: `{ contact, path }` → daemon uploads it into the contact's inbox (`_upload` body-signed by me, size-capped) |
 
 Every admin request must carry a local Host header
 (`127.0.0.1:<port>` / `localhost:<port>`) and any Origin/Referer must
@@ -201,6 +237,11 @@ request from that node reflects them.
   certificate does not hash to the expected fingerprint are refused
   before any payload is trusted. The admin plane remains plain HTTP on
   localhost.
+- Uploads (`POST /v1/upload`) are buffered and **signature-verified
+  before any file is created**, and capped at `inbox_max_size`. The
+  inbox write path refuses symlinks and multi-component names, so a
+  hostile peer cannot reach outside the drop folder; the share itself
+  stays read-only to peers.
 - The admin plane trusts localhost. On shared machines, any local user can
   manage the node — acceptable for single-user office PCs, revisited in M4.
   Cross-process web attacks (DNS rebinding, CSRF) are mitigated by the
@@ -217,4 +258,4 @@ request from that node reflects them.
 - `Range` support on `/v1/file` (M3).
 - Print action: download to temp, then OS shell print verb (M3).
 - Print-on-host via PrintLink wire compatibility (post-v1).
-- WebDAV facade; cross-peer search; `Inbox/` write support (post-v1).
+- WebDAV facade; cross-peer search (post-v1).

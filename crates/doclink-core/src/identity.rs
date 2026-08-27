@@ -78,6 +78,20 @@ impl NodeIdentity {
     /// without it the publisher's anti-replay cache would reject
     /// legitimate fast successive calls to the same path.
     pub fn auth_headers(&self, method: &str, path_q: &str) -> Vec<(String, String)> {
+        self.auth_headers_body(method, path_q, &[])
+    }
+
+    /// Like [Self::auth_headers] but with an HTTP body folded into the
+    /// signed string: "<METHOD>\n<PATH>?<QUERY>\n<TS>\n<NONCE>\n<BODY>".
+    /// Used by /v1/upload, where the receiver only trusts bytes it can
+    /// verify first. `body` is serialized lossily the same way the
+    /// verifier does, so binary files still sign consistently.
+    pub fn auth_headers_body(
+        &self,
+        method: &str,
+        path_q: &str,
+        body: &[u8],
+    ) -> Vec<(String, String)> {
         use rand::RngCore;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -87,7 +101,10 @@ impl NodeIdentity {
         let mut nb = [0u8; 8];
         OsRng.fill_bytes(&mut nb);
         let nonce = hex::encode(nb);
-        let canonical = format!("{method}\n{path_q}\n{ts}\n{nonce}\n");
+        let canonical = format!(
+            "{method}\n{path_q}\n{ts}\n{nonce}\n{}",
+            String::from_utf8_lossy(body)
+        );
         let sig = self.sign(canonical.as_bytes());
         vec![
             ("x-doclink-node".into(), self.node_id()),
@@ -160,5 +177,61 @@ fn harden_key_permissions(path: &Path) {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers_map(headers: &[(String, String)]) -> std::collections::HashMap<String, String> {
+        headers.iter().cloned().collect()
+    }
+
+    #[test]
+    fn body_signed_request_verifies_with_same_body() {
+        let id = NodeIdentity::generate();
+        let body = b"hello shared file contents";
+        let h = headers_map(&id.auth_headers_body("POST", "/v1/upload?name=report.txt", body));
+        let canonical = format!(
+            "POST\n/v1/upload?name=report.txt\n{}\n{}\n{}",
+            h["x-doclink-ts"],
+            h["x-doclink-nonce"],
+            String::from_utf8_lossy(body)
+        );
+        assert!(NodeIdentity::verify(&h["x-doclink-pub"], canonical.as_bytes(), &h["x-doclink-sig"]).is_ok());
+    }
+
+    #[test]
+    fn body_signed_request_rejects_different_body() {
+        let id = NodeIdentity::generate();
+        let h = headers_map(&id.auth_headers_body("POST", "/v1/upload", b"payload-A"));
+        let canonical = format!(
+            "POST\n/v1/upload\n{}\n{}\n{}",
+            h["x-doclink-ts"],
+            h["x-doclink-nonce"],
+            String::from_utf8_lossy(b"payload-B")
+        );
+        assert!(NodeIdentity::verify(&h["x-doclink-pub"], canonical.as_bytes(), &h["x-doclink-sig"]).is_err());
+    }
+
+    #[test]
+    fn empty_body_form_is_forward_compatible() {
+        // auth_headers_body with zero bytes must produce a signature over
+        // the same canonical string the plain auth_headers form signs (no
+        // trailing content after the nonce line).
+        let id = NodeIdentity::generate();
+        let h = headers_map(&id.auth_headers_body("GET", "/v1/list", &[]));
+        let canonical = format!(
+            "GET\n/v1/list\n{}\n{}\n",
+            h["x-doclink-ts"], h["x-doclink-nonce"]
+        );
+        assert!(NodeIdentity::verify(&h["x-doclink-pub"], canonical.as_bytes(), &h["x-doclink-sig"]).is_ok());
+        // …and adding a body under the same nonce must NOT verify.
+        let tampered = format!(
+            "GET\n/v1/list\n{}\n{}\nx",
+            h["x-doclink-ts"], h["x-doclink-nonce"]
+        );
+        assert!(NodeIdentity::verify(&h["x-doclink-pub"], tampered.as_bytes(), &h["x-doclink-sig"]).is_err());
     }
 }

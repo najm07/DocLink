@@ -1,9 +1,9 @@
 //! Wire types shared by all DocLink nodes.
-//! See docs/protocol.md for the full specification (v0.2).
+//! See docs/protocol.md for the full specification (v0.4).
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: &str = "0.3";
+pub const PROTOCOL_VERSION: &str = "0.4";
 pub const DISCOVERY_PORT: u16 = 37654;
 pub const DEFAULT_HTTP_PORT: u16 = 37655;
 pub const BEACON_MAGIC: &str = "DOCLINK_BEACON";
@@ -204,6 +204,30 @@ pub struct ContactInfo {
     pub host: Option<String>,
     pub online: bool,
     pub status: String,
+}
+
+// ---- Inbox / drop-folder (protocol v0.4) ----
+
+/// One file sitting in the owner's inbox drop folder (admin view).
+/// `from*` is absent for files dropped directly on disk (no sidecar).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxEntry {
+    pub name: String,
+    pub size: u64,
+    pub modified_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_unix: Option<u64>,
+}
+
+/// POST /v1/upload response: the (possibly deduped) name stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadResult {
+    pub name: String,
+    pub size: u64,
 }
 
 /// Canonical string the requester signs in a PairRequest.

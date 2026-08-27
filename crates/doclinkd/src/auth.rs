@@ -197,6 +197,8 @@ mod tests {
             node_name: "test-node".into(),
             http_port: 37655,
             share_root: dir.path.join("shared").to_string_lossy().into_owned(),
+            inbox_root: dir.path.join("inbox").to_string_lossy().into_owned(),
+            inbox_max_size: 1024 * 1024,
             advertise: false,
             subnet_scan: false,
             check_updates: false,

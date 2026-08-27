@@ -202,12 +202,12 @@ aside {
 
 .block { flex-wrap: wrap; align-items: flex-start; padding-top: 8px; padding-bottom: 8px; }
 .block .actions { display: flex; flex-wrap: wrap; gap: 4px; width: 100%; margin-top: 6px; }
-.block .actions button, .iacts button, .iacts a, button.text {
+.block .actions button, .block .actions a, .iacts button, .iacts a, button.text {
   height: 22px; padding: 0 8px;
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
   text-decoration: none; display: inline-flex; align-items: center;
 }
-.block .actions button:hover, .iacts a:hover, .iacts button:hover { background: var(--hover); }
+.block .actions button:hover, .block .actions a:hover, .iacts a:hover, .iacts button:hover { background: var(--hover); }
 .danger { color: var(--danger) !important; }
 button.text { border: 0; background: transparent; height: 22px; }
 

@@ -3,13 +3,14 @@
 //! signed browse proxy. Never bound to a LAN interface — management
 //! operations are unreachable from the network.
 
+use crate::inbox::{InboxError, InboxRoot};
 use crate::proxy::{self, ProxyError};
 use crate::server::{self, PairingState};
 use crate::share::{ShareError, ShareRoot};
 use crate::store::{Contact, ContactsFile, Grant, GrantsFile, SharedStore};
 use crate::updater::{self, UpdateOverride};
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -18,7 +19,7 @@ use doclink_core::discovery::PeerRegistry;
 use doclink_core::identity::NodeIdentity;
 use doclink_core::protocol::{
     canonical_decision_string, canonical_request_string, ContactInfo, ErrorResponse, GrantInfo,
-    ListResponse, NodeInfo, PairDecision, PairRequest, PairStatus, PairStatusResponse,
+    InboxEntry, ListResponse, NodeInfo, PairDecision, PairRequest, PairStatus, PairStatusResponse,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -38,6 +39,9 @@ pub(crate) struct AdminInner {
     pub contacts: SharedStore<ContactsFile>,
     pub pairing: PairingState,
     pub share: ShareRoot,
+    pub inbox: InboxRoot,
+    /// Per-file ceiling for inbox uploads (config `inbox_max_size`).
+    pub inbox_max_size: u64,
     /// Port the admin plane is actually bound to (http_port + 1); used by
     /// the Host/Origin guard below.
     pub admin_port: u16,
@@ -77,6 +81,8 @@ impl AppState {
         contacts: SharedStore<ContactsFile>,
         pairing: PairingState,
         share: ShareRoot,
+        inbox: InboxRoot,
+        inbox_max_size: u64,
         admin_port: u16,
         scan_enabled: bool,
         http: reqwest::Client,
@@ -100,6 +106,8 @@ impl AppState {
                 contacts,
                 pairing,
                 share,
+                inbox,
+                inbox_max_size,
                 admin_port,
                 scan_enabled,
                 http,
@@ -146,6 +154,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/browse/{node_id}/list", get(browse_list))
         .route("/v1/admin/browse/{node_id}/file", get(browse_file))
         .route("/v1/admin/browse/{node_id}/raw", get(browse_raw))
+        .route("/v1/admin/inbox", get(inbox_list))
+        .route("/v1/admin/inbox/{name}/file", get(inbox_file))
+        .route("/v1/admin/inbox/{name}/accept", post(inbox_accept))
+        .route("/v1/admin/inbox/{name}", delete(inbox_discard))
+        .route("/v1/admin/send", post(send_file))
         .fallback(static_file)
         .layer(middleware::from_fn_with_state(state.clone(), local_only_guard))
         .with_state(state)
@@ -1114,6 +1127,8 @@ fn snapshot_config(s: &AppState) -> crate::config::Config {
         node_name: s.inner.node.name.clone(),
         http_port: s.inner.data_port,
         share_root: s.inner.share.root().to_string_lossy().into_owned(),
+        inbox_root: s.inner.inbox.root().to_string_lossy().into_owned(),
+        inbox_max_size: s.inner.inbox_max_size,
         advertise: s
             .inner
             .advertise_on
@@ -1520,6 +1535,155 @@ async fn browse_raw(
         header::HeaderValue::from_static("nosniff"),
     );
     Ok(resp)
+}
+
+// ---- Inbox (peer uploads awaiting owner action) ----
+
+fn inbox_err(e: InboxError) -> (StatusCode, Json<ErrorResponse>) {
+    match e {
+        InboxError::InvalidName => err(StatusCode::BAD_REQUEST, "invalid inbox file name"),
+        InboxError::NotFound(_) => err(StatusCode::NOT_FOUND, "inbox file not found"),
+        InboxError::Io(_) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "inbox operation failed",
+        ),
+    }
+}
+
+async fn inbox_list(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<InboxEntry>>, (StatusCode, Json<ErrorResponse>)> {
+    s.inner.inbox.list().await.map(Json).map_err(inbox_err)
+}
+
+async fn inbox_file(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let path = s.inner.inbox.resolve(&name).await.map_err(inbox_err)?;
+    let f = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "inbox read error"))?;
+    let total = f
+        .metadata()
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "inbox read error"))?
+        .len();
+    let safe_name = name.replace('"', "'");
+    let mut out = HeaderMap::new();
+    out.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/octet-stream"),
+    );
+    out.insert(header::CONTENT_LENGTH, total.to_string().parse().unwrap());
+    if let Ok(v) = header::HeaderValue::from_str(&format!("attachment; filename=\"{safe_name}\"")) {
+        out.insert(header::CONTENT_DISPOSITION, v);
+    }
+    let stream = tokio_util::io::ReaderStream::with_capacity(f, 64 * 1024);
+    Ok((out, axum::body::Body::from_stream(stream)).into_response())
+}
+
+fn proxy_error(e: ProxyError) -> (StatusCode, Json<ErrorResponse>) {
+    match e {
+        ProxyError::UnknownPeer => err(StatusCode::NOT_FOUND, "unknown or offline peer"),
+        ProxyError::UnsupportedPeer => err(
+            StatusCode::NOT_IMPLEMENTED,
+            "that PC runs an older DocLink without this feature — update it",
+        ),
+        ProxyError::Upstream(m) => err(StatusCode::BAD_GATEWAY, m),
+    }
+}
+
+async fn inbox_accept(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let moved = s
+        .inner
+        .inbox
+        .accept(&name, s.inner.share.root())
+        .await
+        .map_err(inbox_err)?;
+    Ok(Json(serde_json::json!({ "name": moved })))
+}
+
+async fn inbox_discard(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    s.inner.inbox.remove(&name).await.map_err(inbox_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct SendBody {
+    /// Contact node_id the file goes to.
+    contact: String,
+    /// Path of a file in the owner's own share, relative to the share root.
+    path: String,
+}
+
+/// Send one of your own shared files into a contact's inbox.
+async fn send_file(
+    State(s): State<AppState>,
+    Json(b): Json<SendBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if b.contact.is_empty() || b.path.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "contact and path are required"));
+    }
+    let local = s.inner.share.resolve(&b.path).map_err(|e| match e {
+        ShareError::NotFound(_) => err(StatusCode::NOT_FOUND, "file not found in your share"),
+        ShareError::OutsideRoot | ShareError::IsRoot => {
+            err(StatusCode::FORBIDDEN, "path outside share root")
+        }
+        ShareError::Io(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "share read error"),
+    })?;
+    let md = tokio::fs::metadata(&local)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "share read error"))?;
+    if !md.is_file() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "only files can be sent — pick a file, not a folder",
+        ));
+    }
+    if md.len() > s.inner.inbox_max_size {
+        let cap = s.inner.inbox_max_size / (1024 * 1024);
+        return Err(err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("file is too large to send ({cap} MiB limit)"),
+        ));
+    }
+    let bytes = tokio::fs::read(&local)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "share read error"))?;
+    let name = b.path.rsplit('/').next().unwrap_or("file").to_string();
+    let result = crate::proxy::upload(&s, &b.contact, &name, &bytes)
+        .await
+        .map_err(proxy_error)?;
+    let alias = {
+        let contacts = s.inner.contacts.lock().unwrap().read().clone();
+        contacts
+            .contacts
+            .iter()
+            .find(|c| c.node_id == b.contact)
+            .map(|c| c.alias.clone())
+            .unwrap_or_else(|| {
+                let short = b.contact.chars().take(8).collect::<String>();
+                format!("{short}…")
+            })
+    };
+    s.inner.events.lock().unwrap().push(
+        "inbox-sent",
+        format!("Sent {name} to {alias}"),
+        "They can accept, download, or discard it in their Inbox.".into(),
+    );
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "name": name,
+        "stored": result.name,
+        "to": alias,
+    })))
 }
 
 #[cfg(test)]

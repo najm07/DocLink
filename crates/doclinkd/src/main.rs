@@ -2,6 +2,7 @@ mod admin;
 mod auth;
 mod config;
 mod events;
+mod inbox;
 mod peer;
 mod proxy;
 mod scan;
@@ -139,6 +140,7 @@ async fn main() -> Result<()> {
     let contacts = store::open(&cfg.contacts_path())?;
     let pairing = server::PairingState::default();
     let admin_share = share::ShareRoot::new(&cfg.share_root).context("opening share root")?;
+    let admin_inbox = inbox::InboxRoot::new(&cfg.inbox_root).context("opening inbox root")?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     // Ctrl-C takes the same graceful path as the admin stop endpoint.
@@ -193,9 +195,11 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     ));
 
-    // Data plane: LAN-facing, TLS-only (v0.3), signature-authenticated,
-    // read-only, scope-filtered. The certificate is derived from the node
-    // identity, so peers pin sha256(SPKI) == fingerprint.
+    // Data plane: LAN-facing, TLS-only (v0.3+), signature-authenticated.
+    // Read side stays scope-filtered; the only write path is the inbox
+    // drop folder (v0.4), capped and owner-approved before content lands
+    // in shared/. The certificate is derived from the node identity, so
+    // peers pin sha256(SPKI) == fingerprint.
     let (data_tcp, http_port) =
         bind_with_fallback(std::net::IpAddr::from([0, 0, 0, 0]), http_port, 200).await?;
     let node_tls = doclink_core::cert::NodeTls::from_identity(&identity)
@@ -265,6 +269,8 @@ async fn main() -> Result<()> {
         contacts,
         pairing,
         admin_share,
+        admin_inbox,
+        cfg.inbox_max_size,
         admin_port,
         cfg.subnet_scan,
         http,

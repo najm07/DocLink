@@ -1,11 +1,12 @@
 # DocLink
 
-Peer-to-peer LAN file sharing for Windows — read-only shares, no upload, no central server.
+Peer-to-peer LAN file sharing for Windows — trusted PCs on the same network, no central server.
 
 ## What it does
 
 - Every PC publishes its own `shared/` folder (read-only to peers)
 - You browse other PCs' shares and download files
+- Send files too: a **Send…** button pushes one of your shared files into a PC's **inbox**, where its owner accepts, downloads, or discards it
 - Trust is explicit: you add a PC by its **DocLink ID**, the sharing PC approves once, and you can revoke at any time
 - Grants can be scoped: share one file or subfolder with specific PCs only
 
@@ -23,7 +24,7 @@ Peer-to-peer LAN file sharing for Windows — read-only shares, no upload, no ce
 
 ## Protocol
 
-See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.3, TLS with pinned identity certificates). Two-PC hardware verification: [`docs/lan-test.md`](docs/lan-test.md) (+ `.\lan-test.ps1`).
+See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.4: TLS with pinned identity certificates + inbox uploads). Two-PC hardware verification: [`docs/lan-test.md`](docs/lan-test.md) (+ `.\lan-test.ps1`).
 
 ## Roadmap
 
@@ -94,4 +95,4 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.3, TLS
 - [ ] WebDAV facade (mount a peer's share as a drive letter)
 - [x] Search across all granted peers — toolbar box fans out to every approved, reachable PC; results grouped per PC with View/Download/Print, scope-enforced
 - [x] Auto-update — settings toggle checks GitHub releases every 6 h; a badge next to the ID chip appears when a newer build exists and downloads + swaps the binaries with one click
-- [ ] `Inbox/` write support (upload into a peer's drop folder)
+- [x] `Inbox/` write support — approved PCs push files into your inbox (`/v1/upload`); you accept (moves into `shared/`), download, or discard. "Send…" on any file in My Share pushes it into a contact's inbox

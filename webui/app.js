@@ -235,6 +235,76 @@ async function loadGrants() {
   }
 }
 
+// ---- inbox (files PCs sent you) ----
+
+async function loadInbox() {
+  let entries = [];
+  try {
+    entries = await api("/v1/admin/inbox");
+  } catch (_) { return; }
+  const badge = document.getElementById("act-inbox-files-badge");
+  badge.hidden = entries.length === 0;
+  badge.textContent = entries.length;
+  const ul = document.getElementById("inbox-files");
+  if (!ul) return;
+  ul.innerHTML = "";
+  if (!entries.length) {
+    ul.innerHTML =
+      '<li class="hint-row">Nothing in the inbox yet — PCs you approved can send files here.</li>';
+    return;
+  }
+  for (const e of entries) {
+    const li = document.createElement("li");
+    li.className = "block";
+    const from = e.from ? escapeHtml(e.from) : "dropped directly";
+    const when = e.received_unix ? fmtTime(e.received_unix) : fmtTime(e.modified_unix);
+    li.innerHTML =
+      '<div class="name">' + escapeHtml(e.name) + '</div>' +
+      '<div class="sub">' + from + ' · ' + fmtSize(e.size) + ' · ' + when + '</div>' +
+      '<div class="actions"></div>';
+    const row = li.querySelector(".actions");
+    const acc = document.createElement("button");
+    acc.type = "button";
+    acc.className = "primary";
+    acc.textContent = "Accept";
+    acc.title = "Move into shared/";
+    acc.onclick = async () => {
+      acc.disabled = true;
+      try {
+        await api("/v1/admin/inbox/" + encodeURIComponent(e.name) + "/accept", { method: "POST" });
+        loadInbox();
+        loadListing();
+      } catch (err) {
+        alert(err.message);
+        acc.disabled = false;
+      }
+    };
+    row.appendChild(acc);
+    const dl = document.createElement("a");
+    dl.textContent = "Download";
+    dl.href = "/v1/admin/inbox/" + encodeURIComponent(e.name) + "/file";
+    row.appendChild(dl);
+    const disc = document.createElement("button");
+    disc.type = "button";
+    disc.className = "danger";
+    disc.textContent = "Discard";
+    disc.title = "Delete this file";
+    disc.onclick = async () => {
+      if (!confirm('Discard "' + e.name + '"? This deletes the file.')) return;
+      disc.disabled = true;
+      try {
+        await api("/v1/admin/inbox/" + encodeURIComponent(e.name), { method: "DELETE" });
+        loadInbox();
+      } catch (err) {
+        alert(err.message);
+        disc.disabled = false;
+      }
+    };
+    row.appendChild(disc);
+    ul.appendChild(li);
+  }
+}
+
 // ---- side panel (share item / access editor) ----
 
 function closePanel() {
@@ -304,6 +374,59 @@ async function openSharePanel(path) {
     loadGrants();
   };
   actions.appendChild(save);
+  body.appendChild(actions);
+}
+
+async function openSendPanel(path) {
+  const name = path.split("/").pop();
+  const contacts = await api("/v1/admin/contacts");
+  const body = panelOverlay('Send "' + name + '"');
+  const list = document.createElement("div");
+  let candidates = 0;
+  for (const c of contacts) {
+    if (c.status !== "approved") continue;
+    candidates++;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "sp-row";
+    row.style.width = "100%";
+    row.innerHTML =
+      '<span class="dot ' + (c.online ? "on" : "") + '"></span>' +
+      '<span class="name">' + escapeHtml(c.alias) + '</span>' +
+      '<span class="dim">' + (c.online ? "online — file goes straight to their inbox" : "offline — will try its saved address") + '</span>';
+    row.onclick = async () => {
+      row.disabled = true;
+      note.textContent = "Sending…";
+      try {
+        const r = await api("/v1/admin/send", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ contact: c.node_id, path }),
+        });
+        note.textContent = "Sent — " + escapeHtml(r.name) + " is now in " + escapeHtml(r.to) + "'s inbox.";
+        setTimeout(closePanel, 1200);
+      } catch (err) {
+        note.textContent = err.message;
+        row.disabled = false;
+      }
+    };
+    list.appendChild(row);
+  }
+  body.appendChild(list);
+  const note = document.createElement("p");
+  note.className = "dim";
+  note.textContent = candidates
+    ? "Pick a PC — its owner accepts the file into shared/ from their Inbox."
+    : "No approved PCs yet — approve a request first.";
+  body.appendChild(note);
+  const actions = document.createElement("div");
+  actions.className = "sp-actions";
+  const done = document.createElement("button");
+  done.type = "button";
+  done.className = "primary";
+  done.textContent = "Close";
+  done.onclick = closePanel;
+  actions.appendChild(done);
   body.appendChild(actions);
 }
 
@@ -635,6 +758,14 @@ async function loadListing() {
         sh.textContent = "Share…";
         sh.onclick = () => openSharePanel(e.path);
         acts.appendChild(sh);
+        if (e.kind === "file") {
+          const sn = document.createElement("button");
+          sn.type = "button";
+          sn.textContent = "Send…";
+          sn.title = "Send this file into a PC's inbox";
+          sn.onclick = () => openSendPanel(e.path);
+          acts.appendChild(sn);
+        }
         const del = document.createElement("button");
         del.type = "button";
         del.className = "danger";
@@ -1072,6 +1203,9 @@ function initNetView() {
         renderNet();
         loadVisibility();
       }
+      if (b.dataset.view === "inbox-files") {
+        loadInbox();
+      }
     });
   });
 }
@@ -1260,6 +1394,7 @@ loadInfo();
 loadContacts();
 loadRequests();
 loadGrants();
+loadInbox();
 initNetView();
 initFileView();
 refreshUpdate();
@@ -1285,6 +1420,7 @@ setInterval(() => {
   loadContacts();
   loadRequests();
   loadGrants();
+  loadInbox();
   if (!document.getElementById("add-form").hidden) loadPeers();
   if (state.view === "net") renderNet();
 }, 5000);
