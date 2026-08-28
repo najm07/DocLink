@@ -261,10 +261,27 @@ button.text { border: 0; background: transparent; height: 22px; }
 .fico { width: 16px; height: 16px; flex: none; fill: #dcb67a; }
 .fico.file { fill: none; color: var(--muted); }
 .isize, .itime { color: var(--muted); font-variant-numeric: tabular-nums; }
-.iacts { display: flex; justify-content: flex-end; gap: 4px; opacity: 0; }
-.item:hover .iacts { opacity: 1; }
+.iacts { display: flex; justify-content: flex-end; gap: 4px; }
 .iacts a, .iacts button { font-size: 12px; }
 .iacts button:disabled { opacity: 0.35; cursor: default; }
+.file-menu-btn {
+  width: 22px; height: 22px; border: 0; background: transparent; color: var(--muted);
+  display: grid; place-items: center; border-radius: 3px; font-size: 14px; line-height: 1;
+}
+.file-menu {
+  position: fixed; z-index: 200;
+  min-width: 160px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  padding: 4px 0; display: flex; flex-direction: column;
+}
+.file-menu button, .file-menu a {
+  height: 28px; padding: 0 12px; border: 0; background: transparent; color: var(--text);
+  text-align: left; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; text-decoration: none; cursor: pointer;
+}
+.file-menu button:hover, .file-menu a:hover { background: var(--hover); }
+.file-menu button.danger { color: var(--danger); }
+.file-menu-sep { height: 1px; background: var(--line); margin: 4px 0; }
 
 .empty {
   margin: 24px 16px;
@@ -437,9 +454,19 @@ button.primary {
   grid-template-columns: none;
   display: flex; flex-direction: column; align-items: center;
   text-align: center; height: auto; border-radius: 0; padding: 10px 6px 8px;
+  position: relative;
 }
 #listing.view-icons-sm .item { min-height: 104px; width: 118px; }
 #listing.view-icons-lg .item { min-height: 138px; width: 146px; }
+#listing.view-icons-sm .file-menu-btn,
+#listing.view-icons-lg .file-menu-btn {
+  position: absolute; top: 4px; right: 4px;
+  background: transparent; border: 0; box-shadow: none;
+}
+#listing.view-icons-sm .file-menu-btn:hover,
+#listing.view-icons-lg .file-menu-btn:hover {
+  background: transparent; color: var(--muted);
+}
 #listing.view-icons-sm .iname, #listing.view-icons-lg .iname {
   flex-direction: column; gap: 7px; width: 100%;
 }

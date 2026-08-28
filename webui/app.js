@@ -382,6 +382,53 @@ function panelOverlay(titleText) {
   return el.querySelector(".sp-body");
 }
 
+let openFileMenu = null;
+function closeFileMenu() {
+  if (openFileMenu) { openFileMenu.remove(); openFileMenu = null; }
+}
+document.addEventListener("click", (e) => {
+  if (openFileMenu && !openFileMenu.contains(e.target) && !e.target.closest(".file-menu-btn")) closeFileMenu();
+});
+function createFileMenu(actions) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "file-menu-btn";
+  btn.title = "More actions";
+  btn.innerHTML = "&#8942;";
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    if (openFileMenu && openFileMenu.dataset.for === btn) { closeFileMenu(); return; }
+    closeFileMenu();
+    const menu = document.createElement("div");
+    menu.className = "file-menu";
+    menu.dataset.for = btn;
+    for (const a of actions) {
+      if (a.sep) { const s = document.createElement("div"); s.className = "file-menu-sep"; menu.appendChild(s); continue; }
+      const el = a.href ? document.createElement("a") : document.createElement("button");
+      el.textContent = a.label;
+      if (a.title) el.title = a.title;
+      if (a.danger) el.classList.add("danger");
+      if (a.href) el.href = a.href;
+      else el.type = "button";
+      el.onclick = (ev) => { closeFileMenu(); if (a.onClick) a.onClick(ev); };
+      menu.appendChild(el);
+    }
+    document.body.appendChild(menu);
+    const r = btn.getBoundingClientRect();
+    const mw = menu.offsetWidth || 160;
+    const mh = menu.offsetHeight || 120;
+    let left = r.right - mw;
+    let top = r.bottom + 4;
+    if (left < 8) left = 8;
+    if (top + mh > window.innerHeight - 8) top = r.top - mh - 4;
+    if (top < 8) top = 8;
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+    openFileMenu = menu;
+  };
+  return btn;
+}
+
 async function openSharePanel(path) {
   const grants = await api("/v1/admin/grants");
   const body = panelOverlay('Share "' + path.split("/").pop() + '"');
@@ -823,69 +870,40 @@ async function loadListing() {
       }
       const acts = row.querySelector(".iacts");
       if (mine) {
-        const sh = document.createElement("button");
-        sh.type = "button";
-        sh.textContent = "Share…";
-        sh.onclick = () => openSharePanel(e.path);
-        acts.appendChild(sh);
-        if (e.kind === "file") {
-          const sn = document.createElement("button");
-          sn.type = "button";
-          sn.textContent = "Send…";
-          sn.title = "Send this file into a PC's inbox";
-          sn.onclick = () => openSendPanel(e.path);
-          acts.appendChild(sn);
-          const prOn = document.createElement("button");
-          prOn.type = "button";
-          prOn.textContent = "Print on…";
-          prOn.title = "Print this file on another PC's default printer via PrintLink";
-          prOn.onclick = () => openPrintOnPanel(e.path, "mine", e.name);
-          acts.appendChild(prOn);
-        }
-        const del = document.createElement("button");
-        del.type = "button";
-        del.className = "danger";
-        del.textContent = "Delete";
-        del.onclick = async () => {
-          if (!confirm('Delete "' + e.name + '" from your share?')) return;
-          await api("/v1/admin/myshare?path=" + encodeURIComponent(e.path), { method: "DELETE" });
-          loadListing();
-        };
-        acts.appendChild(del);
+        const actions = [
+          { label: "Share…", onClick: () => openSharePanel(e.path) },
+          ...(e.kind === "file" ? [
+            { label: "Send…", title: "Send this file into a PC's inbox", onClick: () => openSendPanel(e.path) },
+            { label: "Print on…", title: "Print this file on another PC's default printer via PrintLink", onClick: () => openPrintOnPanel(e.path, "mine", e.name) },
+          ] : []),
+          { sep: true },
+          { label: "Delete", danger: true, onClick: async () => {
+            if (!confirm('Delete "' + e.name + '" from your share?')) return;
+            await api("/v1/admin/myshare?path=" + encodeURIComponent(e.path), { method: "DELETE" });
+            loadListing();
+          }},
+        ];
+        acts.appendChild(createFileMenu(actions));
       } else if (e.kind === "file") {
-        const vw = document.createElement("button");
-        vw.type = "button";
-        vw.textContent = "View";
-        vw.title = "Preview before downloading";
-        vw.onclick = () => openViewer(state.selected, e.path, e.size);
-        const dl = document.createElement("a");
-        dl.textContent = "Download";
-        dl.href = "/v1/admin/browse/" + state.selected + "/file?path=" + encodeURIComponent(e.path);
-        const pr = document.createElement("button");
-        pr.type = "button";
-        pr.textContent = "Print";
-        pr.title = "Download and hand to Windows' print verb";
-        pr.onclick = async () => {
-          const mid = document.getElementById("sb-mid");
-          const prev = mid.textContent;
-          pr.disabled = true;
-          mid.textContent = "Printing " + e.name + "…";
-          try {
-            await api("/v1/admin/print/" + state.selected + "?path=" + encodeURIComponent(e.path), { method: "POST" });
-            mid.textContent = "Sent to printer: " + e.name;
-          } catch (err) {
-            mid.textContent = "";
-            status.textContent = err.message;
-          }
-          pr.disabled = false;
-          setTimeout(() => { if (mid.textContent.startsWith("Sent to printer")) mid.textContent = prev; }, 4000);
-        };
-        const prOn = document.createElement("button");
-        prOn.type = "button";
-        prOn.textContent = "Print on…";
-        prOn.title = "Print this file on another PC's default printer";
-        prOn.onclick = () => openPrintOnPanel(e.path, state.selected, e.name);
-        acts.append(vw, dl, pr, prOn);
+        const actions = [
+          { label: "View", title: "Preview before downloading", onClick: () => openViewer(state.selected, e.path, e.size) },
+          { label: "Download", href: "/v1/admin/browse/" + state.selected + "/file?path=" + encodeURIComponent(e.path) },
+          { label: "Print", title: "Download and hand to Windows' print verb", onClick: async () => {
+            const mid = document.getElementById("sb-mid");
+            const prev = mid.textContent;
+            mid.textContent = "Printing " + e.name + "…";
+            try {
+              await api("/v1/admin/print/" + state.selected + "?path=" + encodeURIComponent(e.path), { method: "POST" });
+              mid.textContent = "Sent to printer: " + e.name;
+            } catch (err) {
+              mid.textContent = "";
+              status.textContent = err.message;
+            }
+            setTimeout(() => { if (mid.textContent.startsWith("Sent to printer")) mid.textContent = prev; }, 4000);
+          }},
+          { label: "Print on…", title: "Print this file on another PC's default printer", onClick: () => openPrintOnPanel(e.path, state.selected, e.name) },
+        ];
+        acts.appendChild(createFileMenu(actions));
       }
       grid.appendChild(row);
     }
@@ -1413,29 +1431,20 @@ function renderSearchResults(slices) {
         };
       }
       const acts = row.querySelector(".iacts");
-      const vw = document.createElement("button");
-      vw.type = "button";
-      vw.textContent = "View";
-      if (e.kind === "file") vw.onclick = () => openViewer(slice.node_id, e.path, e.size);
-      else vw.disabled = true;
-      acts.appendChild(vw);
       if (e.kind === "file") {
-        const dl = document.createElement("a");
-        dl.textContent = "Download";
-        dl.href = "/v1/admin/browse/" + slice.node_id + "/file?path=" + encodeURIComponent(e.path);
-        acts.appendChild(dl);
-        const pr = document.createElement("button");
-        pr.type = "button";
-        pr.textContent = "Print";
-        pr.onclick = async () => {
-          try { await api("/v1/admin/print/" + slice.node_id + "?path=" + encodeURIComponent(e.path), { method: "POST" }); } catch (_) {}
-        };
-        acts.appendChild(pr);
-        const prOn = document.createElement("button");
-        prOn.type = "button";
-        prOn.textContent = "Print on…";
-        prOn.onclick = () => openPrintOnPanel(e.path, slice.node_id, e.name);
-        acts.appendChild(prOn);
+        const actions = [
+          { label: "View", onClick: () => openViewer(slice.node_id, e.path, e.size) },
+          { label: "Download", href: "/v1/admin/browse/" + slice.node_id + "/file?path=" + encodeURIComponent(e.path) },
+          { label: "Print", onClick: async () => { try { await api("/v1/admin/print/" + slice.node_id + "?path=" + encodeURIComponent(e.path), { method: "POST" }); } catch (_) {} } },
+          { label: "Print on…", onClick: () => openPrintOnPanel(e.path, slice.node_id, e.name) },
+        ];
+        acts.appendChild(createFileMenu(actions));
+      } else {
+        const vw = document.createElement("button");
+        vw.type = "button";
+        vw.textContent = "View";
+        vw.disabled = true;
+        acts.appendChild(vw);
       }
       grid.appendChild(row);
     }
