@@ -24,7 +24,7 @@ Peer-to-peer LAN file sharing for Windows — trusted PCs on the same network, n
 
 ## Protocol
 
-See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.4: TLS with pinned identity certificates + inbox uploads). Two-PC hardware verification: [`docs/lan-test.md`](docs/lan-test.md) (+ `.\lan-test.ps1`).
+See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.5: TLS with pinned identity certificates + inbox uploads + printing on a peer's default printer via local PrintLink). Two-PC hardware verification: [`docs/lan-test.md`](docs/lan-test.md) (+ `.\lan-test.ps1`).
 
 ## Roadmap
 
@@ -89,9 +89,16 @@ See [`docs/protocol.md`](docs/protocol.md) for the wire specification (v0.4: TLS
 - [x] Settings toggle **Hide this PC from discovery** — live mDNS goodbye/register, persisted to doclink.toml
 - [x] Respect the hide setting in `doclink.toml` / UI (`advertise = false`)
 
+### M6 — Printing on a peer (v0.5)
+
+- [x] **Print on…** — any file (in My Share or a peer's share) can be printed on any approved peer's default printer; the printer host chooses its printer
+- [x] Separate grant permissions: **Files**, **Print**, or **Files + Print** (the Access editor and the Incoming approval both expose the two toggles; `allow_files=false` blocks browsing, `allow_print=false` blocks `POST /v1/print`)
+- [x] Peer data plane `POST /v1/print?name=<file>` (body = raw bytes, `allow_print` required) forwards to the local PrintLink agent at `127.0.0.1:9100` via PrintLink v1.0 HMAC+AES-GCM (9-digit persona, TOFU cert pin, 100 MiB cap, `503` when offline)
+- [x] Local PrintLink client `crates/doclinkd/src/local_print.rs` (unit vectors from the real Python agent + `A→B→local PrintLink` E2E with two DocLink nodes and a stub PrintLink)
+- [x] Admin proxy `POST /v1/admin/print-on/{node_id}` (resolves the file locally or via the browse proxy, then `POST /v1/print` to the target)
+
 ### Post-v1 ideas
 
-- [ ] Print-on-host through PrintLink interop
 - [ ] WebDAV facade (mount a peer's share as a drive letter)
 - [x] Search across all granted peers — toolbar box fans out to every approved, reachable PC; results grouped per PC with View/Download/Print, scope-enforced
 - [x] Auto-update — settings toggle checks GitHub releases every 6 h; a badge next to the ID chip appears when a newer build exists and downloads + swaps the binaries with one click

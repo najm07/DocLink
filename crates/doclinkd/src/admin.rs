@@ -147,6 +147,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/events", get(events_since))
         .route("/v1/admin/settings", get(get_settings).put(put_settings))
         .route("/v1/admin/print/{node_id}", post(print_remote))
+        .route("/v1/admin/print-on/{node_id}", post(print_on_peer_admin))
         .route("/v1/admin/search-all", get(search_all))
         .route("/v1/admin/update/status", get(update_status))
         .route("/v1/admin/update/check", post(update_check))
@@ -293,6 +294,8 @@ fn to_grant_info(g: &Grant) -> GrantInfo {
         granted_unix: g.granted_unix,
         expires_unix: g.expires_unix,
         paths: g.paths.clone(),
+        allow_files: g.allow_files,
+        allow_print: g.allow_print,
     }
 }
 
@@ -641,6 +644,10 @@ async fn list_requests(State(s): State<AppState>) -> Json<Vec<PairRequest>> {
 struct DecisionBody {
     decision: String, // "approve" | "deny"
     duration_secs: u64, // 0 = until revoked
+    #[serde(default)]
+    allow_files: Option<bool>,
+    #[serde(default)]
+    allow_print: Option<bool>,
 }
 
 /// Approve or deny an incoming pair request. On approve, the grant is
@@ -651,14 +658,22 @@ async fn decide_request(
     Path(node_id): Path<String>,
     Json(body): Json<DecisionBody>,
 ) -> Result<Json<PairStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let resp = server::apply_decision(
+    let resp = server::apply_decision_with_perms(
         &s.inner.pairing,
         &s.inner.grants,
         &node_id,
         &body.decision,
         body.duration_secs,
+        body.allow_files,
+        body.allow_print,
     )
-    .map_err(|e| err(StatusCode::NOT_FOUND, e))?;
+    .map_err(|e| {
+        if e == "grant must allow at least files or printing" {
+            err(StatusCode::BAD_REQUEST, e)
+        } else {
+            err(StatusCode::NOT_FOUND, e)
+        }
+    })?;
 
     // Push the decision to the requester so its contact row updates and
     // its browse attempts say "denied" instead of "unknown". Denials are
@@ -777,9 +792,13 @@ async fn revoke_grant(
 struct GrantUpdate {
     /// Empty = full access; otherwise only these paths are visible.
     paths: Vec<String>,
+    #[serde(default)]
+    allow_files: Option<bool>,
+    #[serde(default)]
+    allow_print: Option<bool>,
 }
 
-/// Change a grant's access scope (which files/folders the grantee sees).
+/// Change a grant's access scope and permissions.
 async fn update_grant(
     State(s): State<AppState>,
     Path(fingerprint): Path<String>,
@@ -796,6 +815,19 @@ async fn update_grant(
             return Err(err(StatusCode::NOT_FOUND, "unknown grant"));
         };
         grant.paths = body.paths;
+        if let Some(v) = body.allow_files {
+            grant.allow_files = v;
+        }
+        if let Some(v) = body.allow_print {
+            grant.allow_print = v;
+        }
+        // At least one permission must remain.
+        if !grant.allow_files && !grant.allow_print {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "grant must allow at least files or printing",
+            ));
+        }
         to_grant_info(grant)
     };
     g.save()
@@ -1319,6 +1351,57 @@ async fn print_remote(
         .map_err(|m| err(StatusCode::UNPROCESSABLE_ENTITY, m))?;
 
     tracing::info!(file = %safe_name, peer = %node_id, "sent to printer");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct PrintOnBody {
+    path: String,
+    /// Where the file lives: "mine" or a peer node_id. Defaults to "mine" if absent.
+    #[serde(default)]
+    source_node_id: String,
+    #[serde(default)]
+    source_path: Option<String>,
+}
+
+/// Print a file on a *different* PC's default printer via its local PrintLink.
+/// The file is resolved on the source (mine or a peer), then forwarded as
+/// raw bytes to the target's `POST /v1/print` (which checks `allow_print`).
+async fn print_on_peer_admin(
+    State(s): State<AppState>,
+    Path(target_node_id): Path<String>,
+    Json(body): Json<PrintOnBody>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let path = if let Some(p) = body.source_path { p } else { body.path.clone() };
+    let source = if body.source_node_id.is_empty() { "mine".to_string() } else { body.source_node_id.clone() };
+    if path.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "path must name a file"));
+    }
+    // Resolve file bytes from the source.
+    let (bytes, filename) = if source == "mine" || source == s.inner.node.node_id {
+        let resolved = s.inner.share.resolve(&path).map_err(share_err)?;
+        let data = std::fs::read(&resolved).map_err(|e| err(StatusCode::NOT_FOUND, format!("file not found: {e}")))?;
+        let name = path.rsplit('/').next().unwrap_or("document").to_string();
+        (data, name)
+    } else {
+        let resp = proxy::file(&s, &source, &path, None).await.map_err(proxy_error)?;
+        let data = axum::body::to_bytes(resp.into_body(), crate::local_print::MAX_JOB_BYTES + 1)
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("download failed: {e}")))?;
+        if data.len() > crate::local_print::MAX_JOB_BYTES {
+            return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file exceeds PrintLink size limit (100 MiB)"));
+        }
+        let name = path.rsplit('/').next().unwrap_or("document").to_string();
+        (data.to_vec(), name)
+    };
+    if bytes.len() > crate::local_print::MAX_JOB_BYTES {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file exceeds PrintLink size limit (100 MiB)"));
+    }
+    // Forward to the target peer's local printer.
+    proxy::print_on_peer(&s, &target_node_id, &filename, &bytes)
+        .await
+        .map_err(proxy_error)?;
+    tracing::info!(file = %filename, target = %target_node_id, "forwarded print job to peer");
     Ok(StatusCode::NO_CONTENT)
 }
 

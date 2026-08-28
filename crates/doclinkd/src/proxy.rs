@@ -290,6 +290,36 @@ pub async fn file(
     Ok(response)
 }
 
+pub async fn print_on_peer(
+    s: &AppState,
+    node_id: &str,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), ProxyError> {
+    let target = peer_lookup(s, node_id)?;
+    let path_q = format!("/v1/print?name={}", urlencoding::encode(name));
+    let mut req = s
+        .inner
+        .http
+        .post(format!("{}{}", target.base, path_q))
+        .body(bytes.to_vec())
+        .header("content-type", "application/octet-stream");
+    for (k, v) in s.inner.identity.auth_headers_body("POST", &path_q, bytes) {
+        req = req.header(k, v);
+    }
+    let resp = req.send().await.map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    crate::peer::check(&resp, Some(&target.fingerprint)).map_err(ProxyError::Upstream)?;
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    if is_unsupported_route(status, &body) {
+        return Err(ProxyError::UnsupportedPeer);
+    }
+    if !status.is_success() {
+        return Err(ProxyError::Upstream(upstream_message(status, &body)));
+    }
+    Ok(())
+}
+
 /// Signed upload of a whole (already size-capped) file into a contact's
 /// inbox. The body is folded into the signature, so the receiver can
 /// verify it before writing anything to disk.

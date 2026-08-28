@@ -1,9 +1,9 @@
 //! Wire types shared by all DocLink nodes.
-//! See docs/protocol.md for the full specification (v0.4).
+//! See docs/protocol.md for the full specification (v0.5).
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: &str = "0.4";
+pub const PROTOCOL_VERSION: &str = "0.5";
 pub const DISCOVERY_PORT: u16 = 37654;
 pub const DEFAULT_HTTP_PORT: u16 = 37655;
 pub const BEACON_MAGIC: &str = "DOCLINK_BEACON";
@@ -186,6 +186,8 @@ pub struct PairStatusResponse {
 /// A grant as stored by the sharing node (admin view).
 /// `paths` empty = full access to the share; otherwise only the listed
 /// files/folders (and the parent folders needed to reach them).
+/// `allow_files` / `allow_print` are the two orthogonal permissions:
+/// files+printing, only files, or only printing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrantInfo {
     pub fingerprint: String,
@@ -194,6 +196,14 @@ pub struct GrantInfo {
     pub granted_unix: u64,
     pub expires_unix: Option<u64>,
     pub paths: Vec<String>,
+    #[serde(default = "default_true")]
+    pub allow_files: bool,
+    #[serde(default)]
+    pub allow_print: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A contact as stored by the browsing node (admin view).

@@ -169,37 +169,92 @@ async function loadRequests() {
     li.innerHTML =
       '<div class="name">' + escapeHtml(r.name) + '</div>' +
       '<div class="sub">' + groupId(r.node_id) + ' · wants ' + want + '</div>' +
-      '<div class="actions"></div>';
+      '<div class="actions"></div>' +
+      '<div class="perm-row" style="margin-top:6px;display:flex;gap:6px;align-items:center;font-size:11px;">' +
+      '<label title="Allow browsing and downloading files"><input type="checkbox" class="perm-files" checked> Files</label>' +
+      '<label title="Allow printing on this PC via PrintLink"><input type="checkbox" class="perm-print"> Print</label>' +
+      '</div>';
     const row = li.querySelector(".actions");
+    const permFiles = li.querySelector(".perm-files");
+    const permPrint = li.querySelector(".perm-print");
     for (const d of [1, 7, 30]) {
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = d + "d";
-      b.onclick = () => decide(r.node_id, "approve", d * 86400);
+      b.onclick = () => decide(r.node_id, "approve", d * 86400, permFiles.checked, permPrint.checked);
       row.appendChild(b);
     }
     const always = document.createElement("button");
     always.type = "button";
     always.textContent = "Always";
-    always.onclick = () => decide(r.node_id, "approve", 0);
+    always.onclick = () => decide(r.node_id, "approve", 0, permFiles.checked, permPrint.checked);
     row.appendChild(always);
     const deny = document.createElement("button");
     deny.type = "button";
     deny.className = "danger";
     deny.textContent = "Deny";
-    deny.onclick = () => decide(r.node_id, "deny", 0);
+    deny.onclick = () => decide(r.node_id, "deny", 0, false, false);
     row.appendChild(deny);
     ul.appendChild(li);
   }
 }
 
-async function decide(nodeId, decision, secs) {
+async function decide(nodeId, decision, secs, allowFiles, allowPrint) {
+  const body = { decision, duration_secs: secs };
+  if (decision === "approve") {
+    body.allow_files = !!allowFiles;
+    body.allow_print = !!allowPrint;
+    if (!body.allow_files && !body.allow_print) {
+      alert("Grant must allow at least files or printing.");
+      return;
+    }
+  }
   await api("/v1/admin/requests/" + nodeId + "/decision", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ decision, duration_secs: secs }),
+    body: JSON.stringify(body),
   });
   await Promise.all([loadRequests(), loadGrants()]);
+}
+
+async function openPrintOnPanel(path, sourceNodeId, filename) {
+  const contacts = await api("/v1/admin/contacts");
+  const targets = contacts.filter(c => c.status === "approved");
+  if (!targets.length) {
+    alert("No approved PCs to print on — add a PC first and grant it print permission.");
+    return;
+  }
+  const body = panelOverlay('Print "' + filename + '" on…');
+  const list = document.createElement("div");
+  for (const c of targets) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "sp-row";
+    b.style.width = "100%";
+    b.innerHTML = '<span class="name">' + escapeHtml(c.alias) + '</span><span class="sub">' + escapeHtml(c.node_id) + '</span>';
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await api("/v1/admin/print-on/" + c.node_id, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path, source_node_id: sourceNodeId }),
+        });
+        closePanel();
+        document.getElementById("sb-mid").textContent = "Sent to " + c.alias + " for printing: " + filename;
+        setTimeout(() => { document.getElementById("sb-mid").textContent = ""; }, 4000);
+      } catch (e) {
+        alert(e.message || String(e));
+        b.disabled = false;
+      }
+    };
+    list.appendChild(b);
+  }
+  body.appendChild(list);
+  const hint = document.createElement("p");
+  hint.className = "dim";
+  hint.textContent = "The file will be sent to that PC and printed on its default printer via PrintLink.";
+  body.appendChild(hint);
 }
 
 async function loadGrants() {
@@ -214,9 +269,10 @@ async function loadGrants() {
     const li = document.createElement("li");
     li.className = "row";
     const scope = g.paths && g.paths.length ? g.paths.length + " item(s)" : "Everything";
+    const perm = (g.allow_files !== false ? "Files" : "") + (g.allow_files !== false && g.allow_print ? " + " : "") + (g.allow_print ? "Print" : "");
     li.innerHTML =
       '<span class="grow"><span class="name">' + escapeHtml(g.name) + '</span>' +
-      '<span class="sub">' + fmtExpiry(g) + ' · ' + scope + '</span></span>';
+      '<span class="sub">' + fmtExpiry(g) + ' · ' + scope + ' · ' + perm + '</span></span>';
     const edit = document.createElement("button");
     edit.type = "button";
     edit.className = "text";
@@ -477,6 +533,12 @@ async function buildTree(container, base, checked, depth) {
 
 async function openAccessEditor(g) {
   const body = panelOverlay("Access — " + g.name);
+  const perm = document.createElement("div");
+  perm.className = "sp-mode";
+  perm.innerHTML =
+    '<label><input type="checkbox" id="perm-files"> Files (browse/download)</label>' +
+    '<label><input type="checkbox" id="perm-print"> Printing (print on this PC)</label>';
+  body.appendChild(perm);
   const mode = document.createElement("div");
   mode.className = "sp-mode";
   mode.innerHTML =
@@ -495,6 +557,10 @@ async function openAccessEditor(g) {
   actions.appendChild(save);
   body.appendChild(actions);
 
+  const cbFiles = perm.querySelector("#perm-files");
+  const cbPrint = perm.querySelector("#perm-print");
+  cbFiles.checked = g.allow_files !== false;
+  cbPrint.checked = !!g.allow_print;
   const checked = new Set(g.paths || []);
   const [rAll, rCustom] = mode.querySelectorAll("input");
   rAll.checked = !g.paths || g.paths.length === 0;
@@ -509,10 +575,14 @@ async function openAccessEditor(g) {
 
   save.onclick = async () => {
     const paths = rAll.checked ? [] : topMost([...checked]);
+    if (!cbFiles.checked && !cbPrint.checked) {
+      alert("Grant must allow at least files or printing.");
+      return;
+    }
     await api("/v1/admin/grants/" + g.fingerprint, {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ paths }),
+      body: JSON.stringify({ paths, allow_files: cbFiles.checked, allow_print: cbPrint.checked }),
     });
     closePanel();
     loadGrants();
@@ -765,6 +835,12 @@ async function loadListing() {
           sn.title = "Send this file into a PC's inbox";
           sn.onclick = () => openSendPanel(e.path);
           acts.appendChild(sn);
+          const prOn = document.createElement("button");
+          prOn.type = "button";
+          prOn.textContent = "Print on…";
+          prOn.title = "Print this file on another PC's default printer via PrintLink";
+          prOn.onclick = () => openPrintOnPanel(e.path, "mine", e.name);
+          acts.appendChild(prOn);
         }
         const del = document.createElement("button");
         del.type = "button";
@@ -804,7 +880,12 @@ async function loadListing() {
           pr.disabled = false;
           setTimeout(() => { if (mid.textContent.startsWith("Sent to printer")) mid.textContent = prev; }, 4000);
         };
-        acts.append(vw, dl, pr);
+        const prOn = document.createElement("button");
+        prOn.type = "button";
+        prOn.textContent = "Print on…";
+        prOn.title = "Print this file on another PC's default printer";
+        prOn.onclick = () => openPrintOnPanel(e.path, state.selected, e.name);
+        acts.append(vw, dl, pr, prOn);
       }
       grid.appendChild(row);
     }
@@ -1350,6 +1431,11 @@ function renderSearchResults(slices) {
           try { await api("/v1/admin/print/" + slice.node_id + "?path=" + encodeURIComponent(e.path), { method: "POST" }); } catch (_) {}
         };
         acts.appendChild(pr);
+        const prOn = document.createElement("button");
+        prOn.type = "button";
+        prOn.textContent = "Print on…";
+        prOn.onclick = () => openPrintOnPanel(e.path, slice.node_id, e.name);
+        acts.appendChild(prOn);
       }
       grid.appendChild(row);
     }

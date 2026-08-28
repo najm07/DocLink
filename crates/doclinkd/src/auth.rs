@@ -206,6 +206,8 @@ mod tests {
         let grants: store::SharedStore<GrantsFile> = store::open(&dir.path.join("g.json")).unwrap();
         let contacts: store::SharedStore<crate::store::ContactsFile> =
             store::open(&dir.path.join("c.json")).unwrap();
+        let local_print: store::SharedStore<crate::local_print::LocalPrintFile> =
+            store::open(&dir.path.join("lp.json")).unwrap();
         let identity = NodeIdentity::generate();
         let node = NodeInfo {
             node_id: identity.node_id(),
@@ -214,6 +216,7 @@ mod tests {
             fingerprint: identity.fingerprint(),
             app_version: "0.0.0-test".into(),
         };
+        let http = crate::peer::client();
         let state = AppState::new(
             &cfg,
             node,
@@ -221,6 +224,9 @@ mod tests {
             contacts,
             PairingState::default(),
             crate::events::shared(),
+            http,
+            local_print,
+            identity.clone(),
         );
         (dir, state, identity)
     }
@@ -286,6 +292,8 @@ mod tests {
             granted_unix: unix_now() - 60,
             expires_unix,
             paths: vec![],
+            allow_files: true,
+            allow_print: false,
         };
         state.inner.grants.lock().unwrap().data_mut().upsert(grant);
     }

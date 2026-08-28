@@ -1,4 +1,4 @@
-# DocLink wire protocol — v0.4
+# DocLink wire protocol — v0.5
 
 This document is the language-neutral specification. `doclink-core` is the
 reference implementation; any future client (C#, PrintLink interop) conforms
@@ -22,6 +22,8 @@ v0.2 introduces the **pairing trust model** (AnyDesk/TeamViewer style):
 - All peer traffic after pairing is **signature-authenticated**.
 - Grants may be **scoped**: full access, or an explicit list of files and
   folders the grantee can see.
+
+v0.5 adds **printing on a peer's default printer** via the local PrintLink agent. A peer with `allow_print` may `POST /v1/print` raw bytes; the receiving DocLink forwards them to `https://127.0.0.1:9100` via PrintLink's HMAC+AES-GCM wire (the PrintLink hop is always localhost on the printer host). The UI's **Print on…** sends any file to any approved peer's default printer.
 
 v0.4 adds one write path: **inbox drops**. An approved peer may upload a
 single file into the owner's **inbox** drop folder (`POST /v1/upload`).
@@ -141,6 +143,7 @@ Verification rules (publisher MUST enforce):
 | `GET /v1/search?q=<term>` | required | `SearchResponse`: case-insensitive filename matches across the caller's granted scope (recursive, visit-budget 20k, max 200 hits, `truncated` flag) |
 | `GET /v1/file?path=<rel>` | required | file bytes, streamed; single `Range` supported (`206` + `Content-Range`, `416` when unsatisfiable), `Content-Disposition: attachment` |
 | `POST /v1/upload?name=<file>` | required, **body signed** | drop one file into the owner's inbox → `UploadResult { name, size }`. `<file>` is a single component (no `/`, `\`, `:`, etc. — see inbox rules below). Collisions are renamed `name (1).ext`. Oversized (`> inbox_max_size`) → `413` |
+| `POST /v1/print?name=<file>` | required, **body signed**, `allow_print` | print raw bytes on the peer's default printer via its local PrintLink (`127.0.0.1:9100`, HMAC+AES-GCM). Empty body → `400`, `>100 MiB` → `413`, `allow_print` missing → `403`, PrintLink offline → `503`, token rejected → `401` |
 | `POST /v1/pair/request` | self-signed body | `PairStatusResponse` |
 | `POST /v1/pair/decision` | self-signed body **from a known grantor** | `204`; decisions from unpaired keys are rejected (`403`) |
 | `GET /v1/pair/status?node_id=<id>` | signed poll — caller must authenticate as the queried node (pubkey must hash to it) | `PairStatusResponse` |
@@ -155,16 +158,23 @@ errors additionally carry a stable `"code"` so peers can localize:
 `pending` (pair request not yet approved) · `denied` · `expired` ·
 `unknown-node` (no pairing exists). Messages are end-user ready.
 
-### Grant scoping
+### Grant scoping and permissions
 
-Each grant carries `paths: []`:
+Each grant carries `paths: []` plus two orthogonal permissions:
 
-- **Empty** — full access to the whole share.
+- `allow_files` (default `true`): may browse/download/search/upload. When false, `paths` is ignored and every file endpoint returns `403`.
+- `allow_print` (default `false`): may `POST /v1/print` (printing is separate from file access).
+
+`paths` meaning:
+
+- **Empty** — full access to the whole share (when `allow_files` true).
 - **Non-empty** — the grantee sees only the listed files/folders.
   Listing a directory is allowed when it is inside a granted path or
   contains one (entries are then filtered to visible items). Downloading
   a file is allowed only when the file equals or lies inside a granted
   path. Anything else → `403`.
+
+At least one of `allow_files` / `allow_print` must be true — a grant with neither is rejected. Existing `doclink-grants.json` files without these fields load as `allow_files=true, allow_print=false` (files-only, backward compatible).
 
 ### Inbox (`/v1/upload`, v0.4)
 
@@ -213,6 +223,7 @@ the buffered memory and storage a stiffed peer can force. Enforcement:
 | `POST /v1/admin/inbox/{name}/accept` | Move the file into `shared/` (deduped) → `{ name }` |
 | `DELETE /v1/admin/inbox/{name}` | Discard (delete) the file |
 | `POST /v1/admin/send` | Send one of my own shared files: `{ contact, path }` → daemon uploads it into the contact's inbox (`_upload` body-signed by me, size-capped) |
+| `POST /v1/admin/print-on/{node_id}` | Print a file on a peer's default printer: `{ path, source_node_id }` (`source` is `mine` or a peer id where the file lives). Resolves bytes locally or via the browse proxy, then `POST /v1/print` to the target (requires `allow_print` on the target). `>100 MiB` → `413`, target offline / PrintLink missing → `502`, printer offline → `503` |
 
 Every admin request must carry a local Host header
 (`127.0.0.1:<port>` / `localhost:<port>`) and any Origin/Referer must
@@ -222,10 +233,11 @@ request paths against the management plane.
 ## 8. Grants
 
 Grants are keyed by the requester's fingerprint, carry `granted_unix`,
-optional `expires_unix` (`null` = until revoked), and `paths` (scope).
-They are re-checked on every authenticated request. Expired grants are
-swept every 60 s. Revocation and scope changes are immediate: the next
-request from that node reflects them.
+optional `expires_unix` (`null` = until revoked), `paths` (scope), and
+`allow_files` / `allow_print` (permissions). They are re-checked on every
+authenticated request. Expired grants are swept every 60 s. Revocation
+and permission/scope changes are immediate: the next request from that
+node reflects them.
 
 ## 9. Security notes
 
@@ -253,9 +265,22 @@ request from that node reflects them.
 - Identity keys are ACL-restricted to the current user at creation (and
   re-hardened on load).
 
-## 10. Future extensions (reserved)
+## 10. Local printing and PrintLink (v0.5)
 
-- `Range` support on `/v1/file` (M3).
-- Print action: download to temp, then OS shell print verb (M3).
-- Print-on-host via PrintLink wire compatibility (post-v1).
-- WebDAV facade; cross-peer search (post-v1).
+- **Local print** (`POST /v1/admin/print/{node_id}?path=`): download a peer's file via the signed proxy and hand it to Windows' `print` verb (shell `printto`). No PrintLink involved — the file is printed on *this* PC.
+
+- **Print on a peer** (`POST /v1/admin/print-on/{node_id}` → `POST /v1/print`): the requester resolves the file (own share or peer share via the browse proxy, capped at 100 MiB) and forwards the raw bytes to the target peer's data plane. The target verifies `allow_print`, then forwards to its **local** PrintLink agent at `https://127.0.0.1:9100` (or `19100` fallback in tests, overridable via `DOCLINK_PRINTLINK_PORT`).
+
+Local PrintLink wire (PrintLink v1.0, frozen spec <https://github.com/najm07/Printlink>):
+
+- Host API: `GET /printers` (unauthenticated alias list), `GET /auth-challenge?sender_id=` (9-digit persona, 120 s nonce), `POST /request-share` (tray dialog, returns `token` + `tls_fp`), `POST /print` (multipart `file` + `X-Sender-ID/Hint/Nonce/Signature`, AES-GCM `[12B nonce][ct+tag]`), `POST /revoke-grant`.
+- Persona: `persona_id = format!("{:09}", u64::from_be_bytes(sha256(fingerprint)[24..32]) % 1e9)`.
+- Crypto: `key=sha256(hex_decode(token) fallback utf8)`, `hint=sha256(token)[0..16]`, `sig=HMAC-SHA256(key, nonce)`, `encrypt=AES-256-GCM`.
+- TLS pin: `sha256(DER cert)` TOFU on first `request-share`, re-verified on every `auth-challenge`/`print`. Token stored in `doclink-local-print.json` (100 MiB cap, `503` when the printer is offline, `401` on token rejection).
+- DocLink's `local_print.rs` unit tests include vectors from the real Python agent (cryptography 46.0.5) and the full `A→B→local PrintLink` E2E (two DocLink nodes + a stub PrintLink reporting offline) proves the encrypted path.
+
+Caveat — reference agent WSGI bug (now fixed upstream in PrintLink PR #1): `agent/server.py`'s `_TLSWSGIHandler._wsgi_env` omitted `HTTP_*` header forwarding, so `POST /print`/`revoke-grant` always saw `missing credentials` over the real network (Flask `request.headers` reads `HTTP_X_*`). E2E in this repo patched the local test copy to forward headers per WSGI spec; real hosts need that fix.
+
+## 11. Future extensions (reserved)
+
+- WebDAV facade (post-v1).

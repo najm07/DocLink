@@ -114,6 +114,11 @@ pub(crate) struct Inner {
     pub pair_limiter: RateLimiter,
     /// Toast/notification events (pair requests, expiring grants).
     pub events: crate::events::SharedEvents,
+    /// Outbound HTTP client (also used for local PrintLink).
+    pub http: reqwest::Client,
+    /// Local PrintLink pairing token (127.0.0.1:9100).
+    pub local_print: crate::store::SharedStore<crate::local_print::LocalPrintFile>,
+    pub identity: doclink_core::identity::NodeIdentity,
 }
 
 impl AppState {
@@ -125,6 +130,9 @@ impl AppState {
         contacts: SharedStore<ContactsFile>,
         pairing: PairingState,
         events: crate::events::SharedEvents,
+        http: reqwest::Client,
+        local_print: crate::store::SharedStore<crate::local_print::LocalPrintFile>,
+        identity: doclink_core::identity::NodeIdentity,
     ) -> Self {
         let share = ShareRoot::new(cfg.share_root.clone()).expect("share root must be creatable");
         let inbox = InboxRoot::new(cfg.inbox_root.clone()).expect("inbox root must be creatable");
@@ -140,6 +148,9 @@ impl AppState {
                 seen_sigs: Arc::new(Mutex::new(HashMap::new())),
                 pair_limiter: RateLimiter::default(),
                 events,
+                http,
+                local_print,
+                identity,
             }),
         }
     }
@@ -162,6 +173,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/file", get(file))
         .route("/v1/search", get(search))
         .route("/v1/upload", post(upload))
+        .route("/v1/print", post(print_via_local))
         .merge(pair_routes)
         .with_state(state)
 }
@@ -365,6 +377,9 @@ async fn list(
     let path_q = format!("/v1/list?path={}", urlencoding::encode(&q.path));
     let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)
         .map_err(auth::AuthError::into_response)?;
+    if !grant.allow_files {
+        return Err(err(StatusCode::FORBIDDEN, "printing-only grant cannot browse files"));
+    }
     if !can_list(&grant.paths, &q.path) {
         return Err(err(StatusCode::FORBIDDEN, "path outside grant scope"));
     }
@@ -397,6 +412,9 @@ async fn file(
     let path_q = format!("/v1/file?path={}", urlencoding::encode(&q.path));
     let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)
         .map_err(auth::AuthError::into_response)?;
+    if !grant.allow_files {
+        return Err(err(StatusCode::FORBIDDEN, "printing-only grant cannot download files"));
+    }
     if !can_read_file(&grant.paths, &q.path) {
         return Err(err(StatusCode::FORBIDDEN, "path outside grant scope"));
     }
@@ -489,6 +507,9 @@ async fn upload(
     let path_q = format!("/v1/upload?name={}", urlencoding::encode(name));
     let grant = auth::require_auth(&headers, "POST", &path_q, &body, &s)
         .map_err(auth::AuthError::into_response)?;
+    if !grant.allow_files {
+        return Err(err(StatusCode::FORBIDDEN, "printing-only grant cannot send files"));
+    }
     if body.len() as u64 > s.inner.inbox_max_size {
         let cap = s.inner.inbox_max_size / (1024 * 1024);
         return Err(err(
@@ -517,6 +538,63 @@ async fn upload(
     }))
 }
 
+#[derive(Deserialize)]
+struct PrintQuery {
+    #[serde(default)]
+    name: String,
+}
+
+/// POST /v1/print — peer asks this PC to print a file on its default
+/// printer via the local PrintLink agent (127.0.0.1:9100).
+/// Body is the raw file bytes, `?name=` carries the original filename.
+/// Requires a grant with `allow_print`.
+async fn print_via_local(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<PrintQuery>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let name = if q.name.trim().is_empty() { "document" } else { q.name.trim() };
+    let path_q = format!("/v1/print?name={}", urlencoding::encode(name));
+    let grant = auth::require_auth(&headers, "POST", &path_q, &body, &s)
+        .map_err(auth::AuthError::into_response)?;
+    if !grant.allow_print {
+        return Err(err(StatusCode::FORBIDDEN, "grant does not allow printing"));
+    }
+    if body.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "empty file"));
+    }
+    if body.len() > crate::local_print::MAX_JOB_BYTES {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file exceeds PrintLink size limit (100 MiB)"));
+    }
+    // Ensure we have a local PrintLink pairing (first print shows the tray dialog).
+    let token = crate::local_print::ensure_paired(
+        &s.inner.http,
+        &s.inner.local_print,
+        &s.inner.identity,
+        &s.inner.node.name,
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("local PrintLink: {e}")))?;
+    let persona = crate::local_print::persona_id(&s.inner.identity);
+    crate::local_print::submit_job(&s.inner.http, &token, &persona, name, &body)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("offline") {
+                err(StatusCode::SERVICE_UNAVAILABLE, msg)
+            } else {
+                err(StatusCode::BAD_GATEWAY, msg)
+            }
+        })?;
+    s.inner.events.lock().unwrap().push(
+        "print-job",
+        format!("{} printed {} on this PC", grant.name, name),
+        "Sent to the default printer via PrintLink.".into(),
+    );
+    Ok(Json(serde_json::json!({"status":"printed","printer":"default"})))
+}
+
 /// Scoped recursive filename search over the caller's granted view.
 #[derive(Deserialize)]
 struct SearchQuery {
@@ -532,6 +610,9 @@ async fn search(
     let path_q = format!("/v1/search?q={}", urlencoding::encode(&q.q));
     let grant = auth::require_auth(&headers, "GET", &path_q, b"", &s)
         .map_err(auth::AuthError::into_response)?;
+    if !grant.allow_files {
+        return Err(err(StatusCode::FORBIDDEN, "printing-only grant cannot search"));
+    }
     let query = q.q.trim().to_string();
     if query.chars().count() < 2 {
         return Err(err(
@@ -789,12 +870,25 @@ async fn pair_decision(
 }
 
 /// Shared by the data-plane decision handler and the admin-plane UI action.
+#[allow(dead_code)]
 pub fn apply_decision(
     pairing: &PairingState,
     grants: &SharedStore<GrantsFile>,
     requester_node_id: &str,
     decision: &str,
     duration_secs: u64,
+) -> Result<PairStatusResponse, &'static str> {
+    apply_decision_with_perms(pairing, grants, requester_node_id, decision, duration_secs, None, None)
+}
+
+pub fn apply_decision_with_perms(
+    pairing: &PairingState,
+    grants: &SharedStore<GrantsFile>,
+    requester_node_id: &str,
+    decision: &str,
+    duration_secs: u64,
+    allow_files: Option<bool>,
+    allow_print: Option<bool>,
 ) -> Result<PairStatusResponse, &'static str> {
     let pending = pairing
         .pending
@@ -825,6 +919,11 @@ pub fn apply_decision(
     } else {
         Some(now + duration_secs)
     };
+    let allow_files = allow_files.unwrap_or(true);
+    let allow_print = allow_print.unwrap_or(false);
+    if !allow_files && !allow_print {
+        return Err("grant must allow at least files or printing");
+    }
     let grant = Grant {
         fingerprint: NodeIdentity::fingerprint_from_pubkey_hex(&pending.pubkey_hex)
             .map_err(|_| "bad pubkey")?,
@@ -833,6 +932,8 @@ pub fn apply_decision(
         granted_unix: now,
         expires_unix: expires,
         paths: Vec::new(), // new grants start with full access; scope via admin plane
+        allow_files,
+        allow_print,
     };
     let mut g = grants.lock().unwrap();
     g.data_mut().upsert(grant);

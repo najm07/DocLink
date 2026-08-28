@@ -26,6 +26,10 @@ tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # ShellExecuteExW "print" verb for the M3 print button. The shell types

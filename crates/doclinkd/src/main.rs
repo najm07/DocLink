@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod events;
 mod inbox;
+mod local_print;
 mod peer;
 mod proxy;
 mod scan;
@@ -141,6 +142,7 @@ async fn main() -> Result<()> {
     let pairing = server::PairingState::default();
     let admin_share = share::ShareRoot::new(&cfg.share_root).context("opening share root")?;
     let admin_inbox = inbox::InboxRoot::new(&cfg.inbox_root).context("opening inbox root")?;
+    let local_print = store::open(&local_print::token_path())?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     // Ctrl-C takes the same graceful path as the admin stop endpoint.
@@ -241,7 +243,17 @@ async fn main() -> Result<()> {
         info!("mDNS advertising disabled — this PC is hidden from discovery");
     }
 
-    let data_state = server::AppState::new(&cfg, node.clone(), grants.clone(), contacts.clone(), pairing.clone(), events.clone());
+    let data_state = server::AppState::new(
+        &cfg,
+        node.clone(),
+        grants.clone(),
+        contacts.clone(),
+        pairing.clone(),
+        events.clone(),
+        http.clone(),
+        local_print.clone(),
+        identity.clone(),
+    );
     let data_app = server::router(data_state);
     let config_path = cli.config.clone().unwrap_or_else(|| PathBuf::from("doclink.toml"));
 

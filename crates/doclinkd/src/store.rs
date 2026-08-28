@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Grant {
     /// sha256 of the grantee's public key — the credential checked on every request.
@@ -23,6 +27,12 @@ pub struct Grant {
     /// Defaults to empty so pre-scope grant files keep full access.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// Whether the grantee may browse/download files (list/file/search/upload).
+    #[serde(default = "default_true")]
+    pub allow_files: bool,
+    /// Whether the grantee may print on this PC's default printer via PrintLink.
+    #[serde(default)]
+    pub allow_print: bool,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -287,6 +297,8 @@ mod tests {
             granted_unix: 1000,
             expires_unix,
             paths: vec![],
+            allow_files: true,
+            allow_print: false,
         }
     }
 
